@@ -57,7 +57,7 @@ Three main security groups are defined with strict rules:
 2. Bootstrap CDK (if not already done):
 
    ```bash
-   cdk bootstrap
+   npx cdk bootstrap
    ```
 
 3. Deploy the stack:
