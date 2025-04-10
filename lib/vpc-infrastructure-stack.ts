@@ -1,6 +1,7 @@
 import * as cdk from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as servicediscovery from "aws-cdk-lib/aws-servicediscovery";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
 export class VpcInfrastructureStack extends cdk.Stack {
@@ -24,36 +25,32 @@ export class VpcInfrastructureStack extends cdk.Stack {
     // Create essential VPC endpoints for AWS services
 
     // S3 Gateway Endpoint
-    const s3Endpoint = vpc.addGatewayEndpoint("S3Endpoint", {
+    vpc.addGatewayEndpoint("S3Endpoint", {
       service: ec2.GatewayVpcEndpointAwsService.S3,
     });
 
     // DynamoDB Gateway Endpoint
-    const dynamoDbEndpoint = vpc.addGatewayEndpoint("DynamoDBEndpoint", {
+    vpc.addGatewayEndpoint("DynamoDBEndpoint", {
       service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
     });
 
     // ECR Endpoints
-    const ecrEndpoint = vpc.addInterfaceEndpoint("EcrEndpoint", {
+    vpc.addInterfaceEndpoint("EcrEndpoint", {
       service: ec2.InterfaceVpcEndpointAwsService.ECR,
     });
 
-    const ecrDockerEndpoint = vpc.addInterfaceEndpoint("EcrDockerEndpoint", {
+    vpc.addInterfaceEndpoint("EcrDockerEndpoint", {
       service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
     });
 
     // Service Discovery Endpoint
-    const serviceDiscoveryEndpoint = new ec2.InterfaceVpcEndpoint(
-      this,
-      "ServiceDiscoveryEndpoint",
-      {
-        vpc,
-        service: new ec2.InterfaceVpcEndpointService(
-          `com.amazonaws.${this.region}.servicediscovery`
-        ),
-        privateDnsEnabled: true,
-      }
-    );
+    new ec2.InterfaceVpcEndpoint(this, "ServiceDiscoveryEndpoint", {
+      vpc,
+      service: new ec2.InterfaceVpcEndpointService(
+        `com.amazonaws.${cdk.Stack.of(this).region}.servicediscovery`
+      ),
+      privateDnsEnabled: true,
+    });
 
     // API Gateway Endpoint for WebSocket API
     const apiGatewayEndpoint = new ec2.InterfaceVpcEndpoint(
@@ -62,7 +59,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
       {
         vpc,
         service: new ec2.InterfaceVpcEndpointService(
-          `com.amazonaws.${this.region}.execute-api`
+          `com.amazonaws.${cdk.Stack.of(this).region}.execute-api`
         ),
         privateDnsEnabled: true,
       }
@@ -154,7 +151,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
       this,
       "AiServicesNamespace",
       {
-        name: "ai-services.local",
+        name: "shared-ai-services.local",
         vpc,
         description: "Namespace for AI Language Model Services",
       }
@@ -168,19 +165,129 @@ export class VpcInfrastructureStack extends cdk.Stack {
       description: "DeepSeek LLM service for inference",
     });
 
+    // ------------------------------------------------------------------------
+    // Store infrastructure values in SSM Parameter Store for other services to use
+    // ------------------------------------------------------------------------
+
+    // VPC and Network Configuration
+    new ssm.StringParameter(this, "SsmVpcId", {
+      parameterName: "/deepseek-llm-service/SharedAiServicesVpcId",
+      stringValue: vpc.vpcId,
+      description: "VPC ID for shared AI services",
+    });
+
+    vpc.privateSubnets.forEach((subnet: any, index: number) => {
+      new ssm.StringParameter(this, `SsmSubnet${index + 1}Id`, {
+        parameterName: `/deepseek-llm-service/SharedAiServicesPrivateSubnet${
+          index + 1
+        }Id`,
+        stringValue: subnet.subnetId,
+        description: `Private subnet ${index + 1} ID for shared AI services`,
+      });
+    });
+
+    new ssm.StringParameter(this, "SsmLlmServiceSgId", {
+      parameterName: "/deepseek-llm-service/SharedAiServicesLlmServiceSgId",
+      stringValue: llmServiceSg.securityGroupId,
+      description: "Security Group ID for LLM Service instances",
+    });
+
+    new ssm.StringParameter(this, "SsmLambdaClientSgId", {
+      parameterName: "/deepseek-llm-service/SharedAiServicesLambdaClientSgId",
+      stringValue: lambdaClientSg.securityGroupId,
+      description:
+        "Security Group ID for Lambda functions connecting to LLM Service",
+    });
+
+    new ssm.StringParameter(this, "SsmApiGatewayEndpointSgId", {
+      parameterName:
+        "/deepseek-llm-service/SharedAiServicesApiGatewayEndpointSgId",
+      stringValue: apiGatewayEndpointSg.securityGroupId,
+      description: "Security Group ID for API Gateway endpoint",
+    });
+
+    // Service Discovery Configuration
+    new ssm.StringParameter(this, "SsmNamespaceId", {
+      parameterName: "/deepseek-llm-service/SharedAiServicesNamespaceId",
+      stringValue: namespace.namespaceId,
+      description: "Cloud Map namespace ID for AI services",
+    });
+
+    new ssm.StringParameter(this, "SsmNamespaceName", {
+      parameterName: "/deepseek-llm-service/SharedAiServicesNamespaceName",
+      stringValue: namespace.namespaceName,
+      description: "Cloud Map namespace name for AI services",
+    });
+
+    new ssm.StringParameter(this, "SsmLlmServiceId", {
+      parameterName: "/deepseek-llm-service/SharedAiServicesLlmServiceId",
+      stringValue: llmService.serviceId,
+      description: "LLM Service ID in Cloud Map",
+    });
+
+    new ssm.StringParameter(this, "SsmLlmServiceName", {
+      parameterName: "/deepseek-llm-service/SharedAiServicesLlmServiceName",
+      stringValue: llmService.serviceName,
+      description: "LLM Service name in Cloud Map",
+    });
+
+    new ssm.StringParameter(this, "SsmVpcCidrBlock", {
+      parameterName: "/deepseek-llm-service/SharedAiServicesVpcCidrBlock",
+      stringValue: vpc.vpcCidrBlock,
+      description: "CIDR block of the shared VPC",
+    });
+
+    // Also create parameters for websocket-lambda-deepseek
+    new ssm.StringParameter(this, "SsmWsVpcId", {
+      parameterName: "/websocket-lambda-deepseek/SharedAiServicesVpcId",
+      stringValue: vpc.vpcId,
+      description: "VPC ID for shared AI services",
+    });
+
+    vpc.privateSubnets.forEach((subnet: any, index: number) => {
+      new ssm.StringParameter(this, `SsmWsSubnet${index + 1}Id`, {
+        parameterName: `/websocket-lambda-deepseek/SharedAiServicesPrivateSubnet${
+          index + 1
+        }Id`,
+        stringValue: subnet.subnetId,
+        description: `Private subnet ${index + 1} ID for shared AI services`,
+      });
+    });
+
+    new ssm.StringParameter(this, "SsmWsLambdaClientSgId", {
+      parameterName:
+        "/websocket-lambda-deepseek/SharedAiServicesLambdaClientSgId",
+      stringValue: lambdaClientSg.securityGroupId,
+      description:
+        "Security Group ID for Lambda functions connecting to LLM Service",
+    });
+
+    new ssm.StringParameter(this, "SsmWsNamespaceName", {
+      parameterName: "/websocket-lambda-deepseek/SharedAiServicesNamespaceName",
+      stringValue: namespace.namespaceName,
+      description: "Cloud Map namespace name for AI services",
+    });
+
+    new ssm.StringParameter(this, "SsmWsLlmServiceName", {
+      parameterName:
+        "/websocket-lambda-deepseek/SharedAiServicesLlmServiceName",
+      stringValue: llmService.serviceName,
+      description: "LLM Service name in Cloud Map",
+    });
+
     // Outputs
     // VPC and Subnet IDs
     new cdk.CfnOutput(this, "VpcId", {
       value: vpc.vpcId,
       description: "The ID of the VPC",
-      exportName: "AiServicesVpcId",
+      exportName: "SharedAiServicesVpcId",
     });
 
-    vpc.privateSubnets.forEach((subnet, index) => {
+    vpc.privateSubnets.forEach((subnet: any, index: number) => {
       new cdk.CfnOutput(this, `PrivateSubnet${index + 1}Id`, {
         value: subnet.subnetId,
         description: `The ID of private subnet ${index + 1}`,
-        exportName: `AiServicesPrivateSubnet${index + 1}Id`,
+        exportName: `SharedAiServicesPrivateSubnet${index + 1}Id`,
       });
     });
 
@@ -188,52 +295,52 @@ export class VpcInfrastructureStack extends cdk.Stack {
     new cdk.CfnOutput(this, "LlmServiceSecurityGroupId", {
       value: llmServiceSg.securityGroupId,
       description: "Security Group ID for LLM Service instances",
-      exportName: "AiServicesLlmServiceSgId",
+      exportName: "SharedAiServicesLlmServiceSgId",
     });
 
     new cdk.CfnOutput(this, "LambdaClientSecurityGroupId", {
       value: lambdaClientSg.securityGroupId,
       description:
         "Security Group ID for Lambda functions connecting to LLM Service",
-      exportName: "AiServicesLambdaClientSgId",
+      exportName: "SharedAiServicesLambdaClientSgId",
     });
 
     new cdk.CfnOutput(this, "ApiGatewayEndpointSecurityGroupId", {
       value: apiGatewayEndpointSg.securityGroupId,
       description: "Security Group ID for API Gateway Management endpoint",
-      exportName: "AiServicesApiGatewayEndpointSgId",
+      exportName: "SharedAiServicesApiGatewayEndpointSgId",
     });
 
     // Cloud Map Namespace and Service
     new cdk.CfnOutput(this, "CloudMapNamespaceId", {
       value: namespace.namespaceId,
       description: "The ID of the Cloud Map namespace",
-      exportName: "AiServicesNamespaceId",
+      exportName: "SharedAiServicesNamespaceId",
     });
 
     new cdk.CfnOutput(this, "CloudMapNamespaceName", {
       value: namespace.namespaceName,
       description: "The name of the Cloud Map namespace",
-      exportName: "AiServicesNamespaceName",
+      exportName: "SharedAiServicesNamespaceName",
     });
 
     new cdk.CfnOutput(this, "LlmServiceId", {
       value: llmService.serviceId,
       description: "The ID of the LLM Service in Cloud Map",
-      exportName: "AiServicesLlmServiceId",
+      exportName: "SharedAiServicesLlmServiceId",
     });
 
     new cdk.CfnOutput(this, "LlmServiceName", {
       value: llmService.serviceName,
       description: "The name of the LLM Service in Cloud Map",
-      exportName: "AiServicesLlmServiceName",
+      exportName: "SharedAiServicesLlmServiceName",
     });
 
     // VPC CIDR
     new cdk.CfnOutput(this, "VpcCidrBlock", {
       value: vpc.vpcCidrBlock,
       description: "The CIDR block of the VPC",
-      exportName: "AiServicesVpcCidrBlock",
+      exportName: "SharedAiServicesVpcCidrBlock",
     });
   }
 }

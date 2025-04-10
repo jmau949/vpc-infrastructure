@@ -9,7 +9,8 @@ new VpcInfrastructureStack(app, "AiServicesVpcStack", {
     account: process.env.CDK_DEFAULT_ACCOUNT,
     region: process.env.CDK_DEFAULT_REGION || "us-west-2",
   },
-  description: "Shared VPC infrastructure for AI services",
+  description:
+    "Shared VPC infrastructure for AI services with least permissive security groups and SSM parameter integration",
 });
 
 app.synth();
