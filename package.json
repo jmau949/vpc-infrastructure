@@ -1,0 +1,33 @@
+{
+  "name": "vpc-infrastructure",
+  "version": "1.0.0",
+  "description": "Shared VPC Infrastructure for AI Services",
+  "main": "index.js",
+  "directories": {
+    "lib": "lib"
+  },
+  "scripts": {
+    "build": "tsc",
+    "deploy": "cdk deploy",
+    "synth": "cdk synth",
+    "diff": "cdk diff",
+    "cdk": "cdk",
+    "test": "jest"
+  },
+  "keywords": [
+    "aws",
+    "cdk",
+    "vpc",
+    "infrastructure"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "aws-cdk-lib": "^2.80.0",
+    "constructs": "^10.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.86",
+    "typescript": "^4.9.5"
+  }
+}
