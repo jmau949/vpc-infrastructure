@@ -183,6 +183,14 @@ export class VpcInfrastructureStack extends cdk.Stack {
         stringValue: vpc.privateSubnets[0].subnetId,
         description: "Private subnet 1 ID for shared AI services",
       });
+    } else {
+      // Fallback in case the subnet isn't in the CDK construct
+      new ssm.StringParameter(this, "SsmSubnet1IdFallback", {
+        parameterName: "/deepseek-llm-service/SharedAiServicesPrivateSubnet1Id",
+        stringValue: "subnet-086e161d320489228", // Hard-coded ID from the actual deployed subnet
+        description:
+          "Private subnet 1 ID for shared AI services (hardcoded fallback)",
+      });
     }
 
     // For any additional subnets beyond the first one
@@ -261,6 +269,15 @@ export class VpcInfrastructureStack extends cdk.Stack {
           "/websocket-lambda-deepseek/SharedAiServicesPrivateSubnet1Id",
         stringValue: vpc.privateSubnets[0].subnetId,
         description: "Private subnet 1 ID for shared AI services",
+      });
+    } else {
+      // Fallback in case the subnet isn't in the CDK construct
+      new ssm.StringParameter(this, "SsmWsSubnet1IdFallback", {
+        parameterName:
+          "/websocket-lambda-deepseek/SharedAiServicesPrivateSubnet1Id",
+        stringValue: "subnet-086e161d320489228", // Hard-coded ID from the actual deployed subnet
+        description:
+          "Private subnet 1 ID for shared AI services (hardcoded fallback)",
       });
     }
 
