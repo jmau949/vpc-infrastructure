@@ -4,8 +4,13 @@ import * as servicediscovery from "aws-cdk-lib/aws-servicediscovery";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
+// Define custom stack properties
+export interface IStackProps {
+  environmentName?: string; // Optional property
+}
+
 export class VpcInfrastructureStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+  constructor(scope: Construct, id: string, props?: Record<string, any>) {
     super(scope, id, props);
 
     // Create a VPC with isolated subnets (no internet access)
@@ -52,19 +57,6 @@ export class VpcInfrastructureStack extends cdk.Stack {
       privateDnsEnabled: true,
     });
 
-    // API Gateway Endpoint for WebSocket API
-    const apiGatewayEndpoint = new ec2.InterfaceVpcEndpoint(
-      this,
-      "ApiGatewayEndpoint",
-      {
-        vpc,
-        service: new ec2.InterfaceVpcEndpointService(
-          `com.amazonaws.${cdk.Stack.of(this).region}.execute-api`
-        ),
-        privateDnsEnabled: true,
-      }
-    );
-
     // Security Groups for Microservices
 
     // 1. LLM Service Security Group
@@ -90,6 +82,20 @@ export class VpcInfrastructureStack extends cdk.Stack {
         vpc,
         description: "Security group for API Gateway Management endpoint",
         allowAllOutbound: false, // Restrict outbound traffic
+      }
+    );
+
+    // API Gateway Endpoint for WebSocket API
+    const apiGatewayEndpoint = new ec2.InterfaceVpcEndpoint(
+      this,
+      "ApiGatewayEndpoint",
+      {
+        vpc,
+        service: new ec2.InterfaceVpcEndpointService(
+          `com.amazonaws.${cdk.Stack.of(this).region}.execute-api`
+        ),
+        privateDnsEnabled: true,
+        securityGroups: [apiGatewayEndpointSg], // Explicitly assign the security group
       }
     );
 
@@ -313,6 +319,14 @@ export class VpcInfrastructureStack extends cdk.Stack {
       description: "LLM Service name in Cloud Map",
     });
 
+    // Add API Gateway Endpoint Security Group ID for websocket-lambda-deepseek
+    new ssm.StringParameter(this, "SsmWsApiGatewayEndpointSgId", {
+      parameterName:
+        "/websocket-lambda-deepseek/SharedAiServicesApiGatewayEndpointSgId",
+      stringValue: apiGatewayEndpointSg.securityGroupId,
+      description: "Security Group ID for API Gateway endpoint",
+    });
+
     // Outputs
     // VPC and Subnet IDs
     new cdk.CfnOutput(this, "VpcId", {
@@ -321,7 +335,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
       exportName: "SharedAiServicesVpcId",
     });
 
-    vpc.privateSubnets.forEach((subnet: any, index: number) => {
+    vpc.privateSubnets.forEach((subnet, index: number) => {
       new cdk.CfnOutput(this, `PrivateSubnet${index + 1}Id`, {
         value: subnet.subnetId,
         description: `The ID of private subnet ${index + 1}`,
