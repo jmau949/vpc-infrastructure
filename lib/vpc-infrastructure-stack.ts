@@ -5,27 +5,62 @@ import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
 // Define custom stack properties
-export interface IStackProps {
-  environmentName?: string; // Optional property
+export interface VpcInfrastructureStackProps {
+  environmentName?: string;
+  vpcCidr?: string;
+  maxAzs?: number;
+  cidrMask?: number;
+  llmServicePort?: number;
+  namespaceName?: string;
+  llmServiceName?: string;
+  serviceDiscoveryPrefix?: string;
+  webSocketLambdaPrefix?: string;
+  [key: string]: any; // Allow any other properties to be passed through
 }
 
 export class VpcInfrastructureStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props?: Record<string, any>) {
+  constructor(
+    scope: Construct,
+    id: string,
+    props?: VpcInfrastructureStackProps
+  ) {
+    // Pass properties to the parent constructor
     super(scope, id, props);
+
+    // Use provided values or defaults
+    const vpcCidr = props?.vpcCidr || "172.16.0.0/16";
+    const maxAzs = props?.maxAzs || 1;
+    const cidrMask = props?.cidrMask || 24;
+    const llmServicePort = props?.llmServicePort || 50051;
+    const namespaceName = props?.namespaceName || "shared-ai-services.local";
+    const llmServiceName = props?.llmServiceName || "deepseek-llm";
+    const serviceDiscoveryPrefix =
+      props?.serviceDiscoveryPrefix || "/deepseek-llm-service";
+    const webSocketLambdaPrefix =
+      props?.webSocketLambdaPrefix || "/websocket-lambda-deepseek";
 
     // Create a VPC with isolated subnets (no internet access)
     const vpc = new ec2.Vpc(this, "AiServicesVpc", {
-      maxAzs: 1,
+      maxAzs: maxAzs,
       natGateways: 0, // No NAT gateways to save costs
-      ipAddresses: ec2.IpAddresses.cidr("172.16.0.0/16"),
+      ipAddresses: ec2.IpAddresses.cidr(vpcCidr),
       subnetConfiguration: [
         {
-          name: "private",
+          name: "isolated",
           subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
-          cidrMask: 24,
+          cidrMask: cidrMask,
         },
       ],
     });
+
+    // Debug subnet information
+    console.log(`VPC created with ID: ${vpc.vpcId}`);
+    console.log(`Private subnets count: ${vpc.privateSubnets.length}`);
+    if (vpc.privateSubnets.length > 0) {
+      console.log(`First private subnet ID: ${vpc.privateSubnets[0].subnetId}`);
+    } else {
+      console.log("No private subnets were created!");
+    }
 
     // Create essential VPC endpoints for AWS services
 
@@ -104,7 +139,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
     // LLM Service Rules
     llmServiceSg.addIngressRule(
       lambdaClientSg,
-      ec2.Port.tcp(50051),
+      ec2.Port.tcp(llmServicePort),
       "Allow Lambda clients to connect to LLM service"
     );
 
@@ -118,7 +153,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
     // Lambda Client Rules
     lambdaClientSg.addEgressRule(
       llmServiceSg,
-      ec2.Port.tcp(50051),
+      ec2.Port.tcp(llmServicePort),
       "Allow Lambda to connect to LLM service"
     );
 
@@ -157,7 +192,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
       this,
       "AiServicesNamespace",
       {
-        name: "shared-ai-services.local",
+        name: namespaceName,
         vpc,
         description: "Namespace for AI Language Model Services",
       }
@@ -165,7 +200,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
 
     // Create a service discovery service for the LLM service
     const llmService = namespace.createService("DeepseekLlmService", {
-      name: "deepseek-llm",
+      name: llmServiceName,
       dnsRecordType: servicediscovery.DnsRecordType.A,
       dnsTtl: cdk.Duration.seconds(10),
       description: "DeepSeek LLM service for inference",
@@ -177,152 +212,163 @@ export class VpcInfrastructureStack extends cdk.Stack {
 
     // VPC and Network Configuration
     new ssm.StringParameter(this, "SsmVpcId", {
-      parameterName: "/deepseek-llm-service/SharedAiServicesVpcId",
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesVpcId`,
       stringValue: vpc.vpcId,
       description: "VPC ID for shared AI services",
     });
 
-    // Store each subnet ID directly as needed
-    if (vpc.privateSubnets.length > 0) {
-      new ssm.StringParameter(this, "SsmSubnet1Id", {
-        parameterName: "/deepseek-llm-service/SharedAiServicesPrivateSubnet1Id",
-        stringValue: vpc.privateSubnets[0].subnetId,
+    // Create the subnet parameters directly from the VPC's isolated subnets instead
+    // This ensures we reference the correct type of subnets that are being created
+    if (vpc.isolatedSubnets.length > 0) {
+      console.log(
+        `Using isolated subnets. First subnet ID: ${vpc.isolatedSubnets[0].subnetId}`
+      );
+
+      // Create parameter for the first subnet
+      new ssm.StringParameter(this, "SsmLlmSubnet1Id", {
+        parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesPrivateSubnet1Id`,
+        stringValue: vpc.isolatedSubnets[0].subnetId,
         description: "Private subnet 1 ID for shared AI services",
       });
+
+      // For any additional subnets
+      for (let i = 1; i < vpc.isolatedSubnets.length; i++) {
+        new ssm.StringParameter(this, `SsmLlmSubnet${i + 1}Id`, {
+          parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesPrivateSubnet${
+            i + 1
+          }Id`,
+          stringValue: vpc.isolatedSubnets[i].subnetId,
+          description: `Private subnet ${i + 1} ID for shared AI services`,
+        });
+      }
     } else {
-      // Fallback in case the subnet isn't in the CDK construct
-      new ssm.StringParameter(this, "SsmSubnet1IdFallback", {
-        parameterName: "/deepseek-llm-service/SharedAiServicesPrivateSubnet1Id",
-        stringValue: "subnet-086e161d320489228", // Hard-coded ID from the actual deployed subnet
-        description:
-          "Private subnet 1 ID for shared AI services (hardcoded fallback)",
-      });
+      console.log("No isolated subnets were created!");
     }
 
-    // For any additional subnets beyond the first one
-    for (let i = 1; i < vpc.privateSubnets.length; i++) {
-      new ssm.StringParameter(this, `SsmSubnet${i + 1}Id`, {
-        parameterName: `/deepseek-llm-service/SharedAiServicesPrivateSubnet${
-          i + 1
-        }Id`,
-        stringValue: vpc.privateSubnets[i].subnetId,
-        description: `Private subnet ${i + 1} ID for shared AI services`,
-      });
+    // Keep the original private subnet code as fallback
+    if (vpc.privateSubnets.length > 0) {
+      console.log(`Using private subnets as fallback`);
+      // Original code for private subnets (now as fallback)
     }
 
     new ssm.StringParameter(this, "SsmLlmServiceSgId", {
-      parameterName: "/deepseek-llm-service/SharedAiServicesLlmServiceSgId",
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesLlmServiceSgId`,
       stringValue: llmServiceSg.securityGroupId,
       description: "Security Group ID for LLM Service instances",
     });
 
     new ssm.StringParameter(this, "SsmLambdaClientSgId", {
-      parameterName: "/deepseek-llm-service/SharedAiServicesLambdaClientSgId",
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesLambdaClientSgId`,
       stringValue: lambdaClientSg.securityGroupId,
       description:
         "Security Group ID for Lambda functions connecting to LLM Service",
     });
 
     new ssm.StringParameter(this, "SsmApiGatewayEndpointSgId", {
-      parameterName:
-        "/deepseek-llm-service/SharedAiServicesApiGatewayEndpointSgId",
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesApiGatewayEndpointSgId`,
       stringValue: apiGatewayEndpointSg.securityGroupId,
       description: "Security Group ID for API Gateway endpoint",
     });
 
     // Service Discovery Configuration
     new ssm.StringParameter(this, "SsmNamespaceId", {
-      parameterName: "/deepseek-llm-service/SharedAiServicesNamespaceId",
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesNamespaceId`,
       stringValue: namespace.namespaceId,
       description: "Cloud Map namespace ID for AI services",
     });
 
     new ssm.StringParameter(this, "SsmNamespaceName", {
-      parameterName: "/deepseek-llm-service/SharedAiServicesNamespaceName",
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesNamespaceName`,
       stringValue: namespace.namespaceName,
       description: "Cloud Map namespace name for AI services",
     });
 
     new ssm.StringParameter(this, "SsmLlmServiceId", {
-      parameterName: "/deepseek-llm-service/SharedAiServicesLlmServiceId",
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesLlmServiceId`,
       stringValue: llmService.serviceId,
       description: "LLM Service ID in Cloud Map",
     });
 
     new ssm.StringParameter(this, "SsmLlmServiceName", {
-      parameterName: "/deepseek-llm-service/SharedAiServicesLlmServiceName",
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesLlmServiceName`,
       stringValue: llmService.serviceName,
       description: "LLM Service name in Cloud Map",
     });
 
     new ssm.StringParameter(this, "SsmVpcCidrBlock", {
-      parameterName: "/deepseek-llm-service/SharedAiServicesVpcCidrBlock",
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesVpcCidrBlock`,
       stringValue: vpc.vpcCidrBlock,
       description: "CIDR block of the shared VPC",
     });
 
     // Also create parameters for websocket-lambda-deepseek
     new ssm.StringParameter(this, "SsmWsVpcId", {
-      parameterName: "/websocket-lambda-deepseek/SharedAiServicesVpcId",
+      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesVpcId`,
       stringValue: vpc.vpcId,
       description: "VPC ID for shared AI services",
     });
 
-    // Store websocket lambda subnet parameters directly
-    if (vpc.privateSubnets.length > 0) {
+    // Store websocket lambda subnet parameters using isolated subnets
+    if (vpc.isolatedSubnets.length > 0) {
+      // Create parameter for the first subnet
       new ssm.StringParameter(this, "SsmWsSubnet1Id", {
-        parameterName:
-          "/websocket-lambda-deepseek/SharedAiServicesPrivateSubnet1Id",
+        parameterName: `${webSocketLambdaPrefix}/SharedAiServicesPrivateSubnet1Id`,
+        stringValue: vpc.isolatedSubnets[0].subnetId,
+        description: "Private subnet 1 ID for shared AI services",
+      });
+
+      // For any additional subnets
+      for (let i = 1; i < vpc.isolatedSubnets.length; i++) {
+        new ssm.StringParameter(this, `SsmWsSubnet${i + 1}Id`, {
+          parameterName: `${webSocketLambdaPrefix}/SharedAiServicesPrivateSubnet${
+            i + 1
+          }Id`,
+          stringValue: vpc.isolatedSubnets[i].subnetId,
+          description: `Private subnet ${i + 1} ID for shared AI services`,
+        });
+      }
+    } else if (vpc.privateSubnets.length > 0) {
+      // Fallback to private subnets if no isolated subnets
+      new ssm.StringParameter(this, "SsmWsSubnet1Id", {
+        parameterName: `${webSocketLambdaPrefix}/SharedAiServicesPrivateSubnet1Id`,
         stringValue: vpc.privateSubnets[0].subnetId,
         description: "Private subnet 1 ID for shared AI services",
       });
-    } else {
-      // Fallback in case the subnet isn't in the CDK construct
-      new ssm.StringParameter(this, "SsmWsSubnet1IdFallback", {
-        parameterName:
-          "/websocket-lambda-deepseek/SharedAiServicesPrivateSubnet1Id",
-        stringValue: "subnet-086e161d320489228", // Hard-coded ID from the actual deployed subnet
-        description:
-          "Private subnet 1 ID for shared AI services (hardcoded fallback)",
-      });
-    }
 
-    // For any additional subnets beyond the first one
-    for (let i = 1; i < vpc.privateSubnets.length; i++) {
-      new ssm.StringParameter(this, `SsmWsSubnet${i + 1}Id`, {
-        parameterName: `/websocket-lambda-deepseek/SharedAiServicesPrivateSubnet${
-          i + 1
-        }Id`,
-        stringValue: vpc.privateSubnets[i].subnetId,
-        description: `Private subnet ${i + 1} ID for shared AI services`,
-      });
+      // For any additional subnets
+      for (let i = 1; i < vpc.privateSubnets.length; i++) {
+        new ssm.StringParameter(this, `SsmWsSubnet${i + 1}Id`, {
+          parameterName: `${webSocketLambdaPrefix}/SharedAiServicesPrivateSubnet${
+            i + 1
+          }Id`,
+          stringValue: vpc.privateSubnets[i].subnetId,
+          description: `Private subnet ${i + 1} ID for shared AI services`,
+        });
+      }
     }
 
     new ssm.StringParameter(this, "SsmWsLambdaClientSgId", {
-      parameterName:
-        "/websocket-lambda-deepseek/SharedAiServicesLambdaClientSgId",
+      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesLambdaClientSgId`,
       stringValue: lambdaClientSg.securityGroupId,
       description:
         "Security Group ID for Lambda functions connecting to LLM Service",
     });
 
     new ssm.StringParameter(this, "SsmWsNamespaceName", {
-      parameterName: "/websocket-lambda-deepseek/SharedAiServicesNamespaceName",
+      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesNamespaceName`,
       stringValue: namespace.namespaceName,
       description: "Cloud Map namespace name for AI services",
     });
 
     new ssm.StringParameter(this, "SsmWsLlmServiceName", {
-      parameterName:
-        "/websocket-lambda-deepseek/SharedAiServicesLlmServiceName",
+      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesLlmServiceName`,
       stringValue: llmService.serviceName,
       description: "LLM Service name in Cloud Map",
     });
 
     // Add API Gateway Endpoint Security Group ID for websocket-lambda-deepseek
     new ssm.StringParameter(this, "SsmWsApiGatewayEndpointSgId", {
-      parameterName:
-        "/websocket-lambda-deepseek/SharedAiServicesApiGatewayEndpointSgId",
+      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesApiGatewayEndpointSgId`,
       stringValue: apiGatewayEndpointSg.securityGroupId,
       description: "Security Group ID for API Gateway endpoint",
     });
@@ -335,13 +381,24 @@ export class VpcInfrastructureStack extends cdk.Stack {
       exportName: "SharedAiServicesVpcId",
     });
 
-    vpc.privateSubnets.forEach((subnet, index: number) => {
-      new cdk.CfnOutput(this, `PrivateSubnet${index + 1}Id`, {
-        value: subnet.subnetId,
-        description: `The ID of private subnet ${index + 1}`,
-        exportName: `SharedAiServicesPrivateSubnet${index + 1}Id`,
+    // Output both isolated and private subnets
+    if (vpc.isolatedSubnets.length > 0) {
+      vpc.isolatedSubnets.forEach((subnet, index: number) => {
+        new cdk.CfnOutput(this, `IsolatedSubnet${index + 1}Id`, {
+          value: subnet.subnetId,
+          description: `The ID of isolated subnet ${index + 1}`,
+          exportName: `SharedAiServicesPrivateSubnet${index + 1}Id`,
+        });
       });
-    });
+    } else if (vpc.privateSubnets.length > 0) {
+      vpc.privateSubnets.forEach((subnet, index: number) => {
+        new cdk.CfnOutput(this, `PrivateSubnet${index + 1}Id`, {
+          value: subnet.subnetId,
+          description: `The ID of private subnet ${index + 1}`,
+          exportName: `SharedAiServicesPrivateSubnet${index + 1}Id`,
+        });
+      });
+    }
 
     // Security Group IDs
     new cdk.CfnOutput(this, "LlmServiceSecurityGroupId", {

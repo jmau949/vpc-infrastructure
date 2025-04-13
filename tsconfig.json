@@ -21,8 +21,9 @@
     "checkJs": false,
     "skipLibCheck": true,
     "typeRoots": ["./node_modules/@types"],
-    "outDir": "dist"
+    "outDir": "dist",
+    "rootDir": "."
   },
-  "include": ["**/*.ts"],
-  "exclude": ["node_modules", "cdk.out"]
+  "include": ["bin/**/*.ts", "lib/**/*.ts"],
+  "exclude": ["node_modules", "cdk.out", "dist"]
 }
