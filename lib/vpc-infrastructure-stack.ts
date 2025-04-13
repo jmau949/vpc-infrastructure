@@ -65,14 +65,21 @@ export class VpcInfrastructureStack extends cdk.Stack {
     // Create essential VPC endpoints for AWS services
 
     // S3 Gateway Endpoint
-    vpc.addGatewayEndpoint("S3Endpoint", {
+    const s3Endpoint = vpc.addGatewayEndpoint("S3Endpoint", {
       service: ec2.GatewayVpcEndpointAwsService.S3,
+      subnets: [{ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }],
     });
 
-    // DynamoDB Gateway Endpoint
-    vpc.addGatewayEndpoint("DynamoDBEndpoint", {
+    // DynamoDB Gateway Endpoint - Store the endpoint for security group rules
+    const dynamoDbEndpoint = vpc.addGatewayEndpoint("DynamoDBEndpoint", {
       service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
+      subnets: [{ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }],
     });
+
+    // Log the DynamoDB endpoint ID for debugging
+    console.log(
+      `DynamoDB VPC Endpoint created with ID: ${dynamoDbEndpoint.vpcEndpointId}`
+    );
 
     // ECR Endpoints
     vpc.addInterfaceEndpoint("EcrEndpoint", {
@@ -169,6 +176,25 @@ export class VpcInfrastructureStack extends cdk.Stack {
       ec2.Port.tcp(443),
       "Allow HTTPS egress to VPC endpoints for Service Discovery"
     );
+
+    // NEW: Add specific egress rule for DynamoDB endpoint
+    // This is critical for Lambda to access DynamoDB through the VPC endpoint
+    try {
+      // Get the DynamoDB prefix list from the endpoint
+      const dynamoDbPrefixList = dynamoDbEndpoint.vpcEndpointId;
+      console.log(
+        `Adding egress rule for DynamoDB prefix list ID: ${dynamoDbPrefixList}`
+      );
+
+      // Add explicit egress rule for DynamoDB
+      lambdaClientSg.addEgressRule(
+        ec2.Peer.prefixList(dynamoDbPrefixList),
+        ec2.Port.tcp(443),
+        "Allow Lambda to access DynamoDB VPC endpoint"
+      );
+    } catch (error) {
+      console.error("Error adding DynamoDB prefix list egress rule:", error);
+    }
 
     // API Gateway Endpoint Rules
     apiGatewayEndpointSg.addIngressRule(
@@ -270,6 +296,13 @@ export class VpcInfrastructureStack extends cdk.Stack {
       description: "Security Group ID for API Gateway endpoint",
     });
 
+    // NEW: Store DynamoDB endpoint ID in SSM for reference
+    new ssm.StringParameter(this, "SsmDynamoDbEndpointId", {
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesDynamoDbEndpointId`,
+      stringValue: dynamoDbEndpoint.vpcEndpointId,
+      description: "DynamoDB VPC Endpoint ID for shared AI services",
+    });
+
     // Service Discovery Configuration
     new ssm.StringParameter(this, "SsmNamespaceId", {
       parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesNamespaceId`,
@@ -347,6 +380,13 @@ export class VpcInfrastructureStack extends cdk.Stack {
       }
     }
 
+    // NEW: Also store DynamoDB endpoint ID for websocket stack
+    new ssm.StringParameter(this, "SsmWsDynamoDbEndpointId", {
+      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesDynamoDbEndpointId`,
+      stringValue: dynamoDbEndpoint.vpcEndpointId,
+      description: "DynamoDB VPC Endpoint ID for shared AI services",
+    });
+
     new ssm.StringParameter(this, "SsmWsLambdaClientSgId", {
       parameterName: `${webSocketLambdaPrefix}/SharedAiServicesLambdaClientSgId`,
       stringValue: lambdaClientSg.securityGroupId,
@@ -418,6 +458,13 @@ export class VpcInfrastructureStack extends cdk.Stack {
       value: apiGatewayEndpointSg.securityGroupId,
       description: "Security Group ID for API Gateway Management endpoint",
       exportName: "SharedAiServicesApiGatewayEndpointSgId",
+    });
+
+    // NEW: Output DynamoDB endpoint ID
+    new cdk.CfnOutput(this, "DynamoDbEndpointId", {
+      value: dynamoDbEndpoint.vpcEndpointId,
+      description: "DynamoDB VPC Endpoint ID",
+      exportName: "SharedAiServicesDynamoDbEndpointId",
     });
 
     // Cloud Map Namespace and Service
