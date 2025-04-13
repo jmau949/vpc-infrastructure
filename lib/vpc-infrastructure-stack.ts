@@ -208,7 +208,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
       new cdk.aws_iam.PolicyStatement({
         effect: cdk.aws_iam.Effect.ALLOW,
         principals: [new cdk.aws_iam.AnyPrincipal()],
-        actions: ["execute-api:Invoke"],
+        actions: ["execute-api:Invoke", "execute-api:ManageConnections"],
         resources: ["*"],
       })
     );
