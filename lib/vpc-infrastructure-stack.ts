@@ -81,23 +81,33 @@ export class VpcInfrastructureStack extends cdk.Stack {
       `DynamoDB VPC Endpoint created with ID: ${dynamoDbEndpoint.vpcEndpointId}`
     );
 
+    // Service Discovery Endpoint
+    const serviceDiscoveryEndpoint = new ec2.InterfaceVpcEndpoint(
+      this,
+      "ServiceDiscoveryEndpoint",
+      {
+        vpc,
+        service: new ec2.InterfaceVpcEndpointService(
+          `com.amazonaws.${cdk.Stack.of(this).region}.servicediscovery`
+        ),
+        privateDnsEnabled: true,
+      }
+    );
+    cdk.Tags.of(serviceDiscoveryEndpoint).add(
+      "Name",
+      "service-discovery-endpoint-sg"
+    );
+
     // ECR Endpoints
-    vpc.addInterfaceEndpoint("EcrEndpoint", {
+    const ecrEndpoint = vpc.addInterfaceEndpoint("EcrEndpoint", {
       service: ec2.InterfaceVpcEndpointAwsService.ECR,
     });
+    cdk.Tags.of(ecrEndpoint).add("Name", "ecr-endpoint-sg");
 
-    vpc.addInterfaceEndpoint("EcrDockerEndpoint", {
+    const ecrDockerEndpoint = vpc.addInterfaceEndpoint("EcrDockerEndpoint", {
       service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
     });
-
-    // Service Discovery Endpoint
-    new ec2.InterfaceVpcEndpoint(this, "ServiceDiscoveryEndpoint", {
-      vpc,
-      service: new ec2.InterfaceVpcEndpointService(
-        `com.amazonaws.${cdk.Stack.of(this).region}.servicediscovery`
-      ),
-      privateDnsEnabled: true,
-    });
+    cdk.Tags.of(ecrDockerEndpoint).add("Name", "ecr-docker-endpoint-sg");
 
     // Security Groups for Microservices
 
@@ -107,6 +117,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
       description: "Security group for LLM Service instances",
       allowAllOutbound: false, // Restrict outbound traffic
     });
+    cdk.Tags.of(llmServiceSg).add("Name", "llm-service-sg");
 
     // 2. Lambda Client Security Group
     const lambdaClientSg = new ec2.SecurityGroup(this, "LambdaClientSg", {
@@ -115,6 +126,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
         "Security group for Lambda functions connecting to LLM Service",
       allowAllOutbound: false, // Restrict outbound traffic
     });
+    cdk.Tags.of(lambdaClientSg).add("Name", "lambda-client-sg");
 
     // 3. API Gateway Endpoint Security Group
     const apiGatewayEndpointSg = new ec2.SecurityGroup(
@@ -126,6 +138,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
         allowAllOutbound: false, // Restrict outbound traffic
       }
     );
+    cdk.Tags.of(apiGatewayEndpointSg).add("Name", "api-gateway-endpoint-sg");
 
     // API Gateway Endpoint for WebSocket API
     const apiGatewayEndpoint = new ec2.InterfaceVpcEndpoint(
@@ -177,25 +190,25 @@ export class VpcInfrastructureStack extends cdk.Stack {
       "Allow HTTPS egress to VPC endpoints for Service Discovery"
     );
 
-    // NEW: Add specific egress rule for DynamoDB endpoint
-    // This is critical for Lambda to access DynamoDB through the VPC endpoint
-    try {
-      // Get the DynamoDB prefix list from the endpoint
-      const dynamoDbPrefixList = dynamoDbEndpoint.vpcEndpointId;
-      console.log(
-        `Adding egress rule for DynamoDB prefix list ID: ${dynamoDbPrefixList}`
-      );
+    // // Get the prefix list ID for DynamoDB endpoint
+    // const dynamoDbPrefixList = cdk.Fn.importValue(
+    //   "com.amazonaws." + cdk.Stack.of(this).region + ".dynamodb.prefixListId"
+    // );
+    // console.log(
+    //   `Adding egress rule for DynamoDB prefix list ID: ${dynamoDbPrefixList}`
+    // );
 
-      // Add explicit egress rule for DynamoDB
-      lambdaClientSg.addEgressRule(
-        ec2.Peer.prefixList(dynamoDbPrefixList),
-        ec2.Port.tcp(443),
-        "Allow Lambda to access DynamoDB VPC endpoint"
-      );
-    } catch (error) {
-      console.error("Error adding DynamoDB prefix list egress rule:", error);
-    }
-
+    // lambdaClientSg.addEgressRule(
+    //   ec2.Peer.prefixList(dynamoDbPrefixList),
+    //   ec2.Port.tcp(443),
+    //   "Allow Lambda to access DynamoDB VPC endpoint"
+    // );
+    // This is a less secure option but will work
+    lambdaClientSg.addEgressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(443),
+      "Allow HTTPS egress to AWS services including DynamoDB"
+    );
     // API Gateway Endpoint Rules
     apiGatewayEndpointSg.addIngressRule(
       lambdaClientSg,
@@ -412,6 +425,17 @@ export class VpcInfrastructureStack extends cdk.Stack {
       stringValue: apiGatewayEndpointSg.securityGroupId,
       description: "Security Group ID for API Gateway endpoint",
     });
+
+    // Tag the VPC with a different name than its default security group
+    cdk.Tags.of(vpc).add("Name", "ai-services-vpc");
+
+    // Tag the VPC's default security group separately
+    const defaultSg = ec2.SecurityGroup.fromSecurityGroupId(
+      this,
+      "DefaultSecurityGroup",
+      vpc.vpcDefaultSecurityGroup
+    );
+    cdk.Tags.of(defaultSg).add("Name", "ai-services-vpc-default-sg");
 
     // Outputs
     // VPC and Subnet IDs
