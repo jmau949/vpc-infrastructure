@@ -1,21 +1,31 @@
 import * as cdk from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
-import * as servicediscovery from "aws-cdk-lib/aws-servicediscovery";
 import * as ssm from "aws-cdk-lib/aws-ssm";
+import * as elasticloadbalancingv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
+import * as apigatewayv2 from "aws-cdk-lib/aws-apigatewayv2";
 import { Construct } from "constructs";
 
-// Define custom stack properties
-export interface VpcInfrastructureStackProps {
+/**
+ * Properties for the VPC Infrastructure Stack
+ *
+ * This stack creates the foundational VPC infrastructure for the AI chatbot
+ * including networking, security groups, and load balancer components
+ */
+export interface VpcInfrastructureStackProps extends cdk.StackProps {
+  /** Optional environment name for resource naming */
   environmentName?: string;
+  /** CIDR block for the VPC (default: 172.16.0.0/16) */
   vpcCidr?: string;
+  /** Maximum number of Availability Zones to use (default: 1) */
   maxAzs?: number;
+  /** CIDR mask for subnet division (default: 24) */
   cidrMask?: number;
+  /** Port used by the LLM service (default: 50051) */
   llmServicePort?: number;
-  namespaceName?: string;
-  llmServiceName?: string;
+  /** Prefix for SSM parameters related to LLM service */
   serviceDiscoveryPrefix?: string;
+  /** Prefix for SSM parameters related to WebSocket Lambda */
   webSocketLambdaPrefix?: string;
-  [key: string]: any; // Allow any other properties to be passed through
 }
 
 export class VpcInfrastructureStack extends cdk.Stack {
@@ -24,7 +34,6 @@ export class VpcInfrastructureStack extends cdk.Stack {
     id: string,
     props?: VpcInfrastructureStackProps
   ) {
-    // Pass properties to the parent constructor
     super(scope, id, props);
 
     // Use provided values or defaults
@@ -32,222 +41,179 @@ export class VpcInfrastructureStack extends cdk.Stack {
     const maxAzs = props?.maxAzs || 1;
     const cidrMask = props?.cidrMask || 24;
     const llmServicePort = props?.llmServicePort || 50051;
-    const namespaceName = props?.namespaceName || "shared-ai-services.local";
-    const llmServiceName = props?.llmServiceName || "deepseek-llm";
     const serviceDiscoveryPrefix =
       props?.serviceDiscoveryPrefix || "/deepseek-llm-service";
     const webSocketLambdaPrefix =
       props?.webSocketLambdaPrefix || "/websocket-lambda-deepseek";
 
-    // Create a VPC with isolated subnets (no internet access)
+    /**
+     * Create a VPC with both public and private subnets
+     * - Public subnets for NAT Gateway
+     * - Private subnets with NAT Gateway for LLM service instances
+     *
+     * The private subnets allow outbound internet access through
+     * the NAT Gateway for package updates and container image pulls
+     */
     const vpc = new ec2.Vpc(this, "AiServicesVpc", {
       maxAzs: maxAzs,
-      natGateways: 0, // No NAT gateways to save costs
+      natGateways: 1, // Single NAT gateway for cost optimization
       ipAddresses: ec2.IpAddresses.cidr(vpcCidr),
       subnetConfiguration: [
         {
-          name: "isolated",
-          subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
+          name: "public",
+          subnetType: ec2.SubnetType.PUBLIC,
+          cidrMask: cidrMask,
+        },
+        {
+          name: "private",
+          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
           cidrMask: cidrMask,
         },
       ],
     });
 
-    // Debug subnet information
-    console.log(`VPC created with ID: ${vpc.vpcId}`);
-    console.log(`Private subnets count: ${vpc.privateSubnets.length}`);
-    if (vpc.privateSubnets.length > 0) {
-      console.log(`First private subnet ID: ${vpc.privateSubnets[0].subnetId}`);
-    } else {
-      console.log("No private subnets were created!");
-    }
-
-    // Create essential VPC endpoints for AWS services
-
-    // S3 Gateway Endpoint
-    const s3Endpoint = vpc.addGatewayEndpoint("S3Endpoint", {
+    /**
+     * Create S3 Gateway Endpoint
+     *
+     * This allows instances in private subnets to access S3 without
+     * going through the NAT Gateway, reducing data transfer costs
+     * and improving security by keeping traffic within AWS network
+     */
+    vpc.addGatewayEndpoint("S3Endpoint", {
       service: ec2.GatewayVpcEndpointAwsService.S3,
-      subnets: [{ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }],
+      subnets: [{ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }],
     });
 
-    // DynamoDB Gateway Endpoint - Store the endpoint for security group rules
-    const dynamoDbEndpoint = vpc.addGatewayEndpoint("DynamoDBEndpoint", {
-      service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
-      subnets: [{ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }],
-    });
+    /**
+     * Security Groups
+     *
+     * Define security groups with least privilege principle:
+     * 1. LLM Service SG - For the EC2 instances running the LLM service
+     * 2. ALB SG - For the private Application Load Balancer
+     */
 
-    // Log the DynamoDB endpoint ID for debugging
-    console.log(
-      `DynamoDB VPC Endpoint created with ID: ${dynamoDbEndpoint.vpcEndpointId}`
-    );
-
-    // Service Discovery Endpoint
-    const serviceDiscoveryEndpoint = new ec2.InterfaceVpcEndpoint(
-      this,
-      "ServiceDiscoveryEndpoint",
-      {
-        vpc,
-        service: new ec2.InterfaceVpcEndpointService(
-          `com.amazonaws.${cdk.Stack.of(this).region}.servicediscovery`
-        ),
-        privateDnsEnabled: true,
-      }
-    );
-    cdk.Tags.of(serviceDiscoveryEndpoint).add(
-      "Name",
-      "service-discovery-endpoint-sg"
-    );
-
-    // ECR Endpoints
-    const ecrEndpoint = vpc.addInterfaceEndpoint("EcrEndpoint", {
-      service: ec2.InterfaceVpcEndpointAwsService.ECR,
-    });
-    cdk.Tags.of(ecrEndpoint).add("Name", "ecr-endpoint-sg");
-
-    const ecrDockerEndpoint = vpc.addInterfaceEndpoint("EcrDockerEndpoint", {
-      service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
-    });
-    cdk.Tags.of(ecrDockerEndpoint).add("Name", "ecr-docker-endpoint-sg");
-
-    // Security Groups for Microservices
-
-    // 1. LLM Service Security Group
+    // Security group for LLM service instances
     const llmServiceSg = new ec2.SecurityGroup(this, "LlmServiceSg", {
       vpc,
       description: "Security group for LLM Service instances",
-      allowAllOutbound: false, // Restrict outbound traffic
+      allowAllOutbound: true, // Allow outbound for container image pulls and updates
     });
     cdk.Tags.of(llmServiceSg).add("Name", "llm-service-sg");
 
-    // 2. Lambda Client Security Group
-    const lambdaClientSg = new ec2.SecurityGroup(this, "LambdaClientSg", {
+    // Security group for the Application Load Balancer
+    const albSg = new ec2.SecurityGroup(this, "AlbSg", {
       vpc,
-      description:
-        "Security group for Lambda functions connecting to LLM Service",
-      allowAllOutbound: false, // Restrict outbound traffic
+      description: "Security group for Application Load Balancer",
+      allowAllOutbound: false, // Restrict outbound traffic (least privilege)
     });
-    cdk.Tags.of(lambdaClientSg).add("Name", "lambda-client-sg");
+    cdk.Tags.of(albSg).add("Name", "alb-sg");
 
-    // 3. API Gateway Endpoint Security Group
-    const apiGatewayEndpointSg = new ec2.SecurityGroup(
-      this,
-      "ApiGatewayEndpointSg",
-      {
-        vpc,
-        description: "Security group for API Gateway Management endpoint",
-        allowAllOutbound: false, // Restrict outbound traffic
-      }
-    );
-    cdk.Tags.of(apiGatewayEndpointSg).add("Name", "api-gateway-endpoint-sg");
+    /**
+     * Security Group Rules
+     *
+     * Define the necessary ingress/egress rules:
+     * - Allow ALB to send traffic to LLM service
+     * - Allow LLM service to receive traffic from ALB
+     */
 
-    // API Gateway Endpoint for WebSocket API
-    const apiGatewayEndpoint = new ec2.InterfaceVpcEndpoint(
-      this,
-      "ApiGatewayEndpoint",
-      {
-        vpc,
-        service: new ec2.InterfaceVpcEndpointService(
-          `com.amazonaws.${cdk.Stack.of(this).region}.execute-api`
-        ),
-        privateDnsEnabled: true,
-        securityGroups: [apiGatewayEndpointSg], // Explicitly assign the security group
-      }
-    );
-
-    // Security Group Rules
-
-    // LLM Service Rules
+    // Allow LLM service to receive traffic from ALB
     llmServiceSg.addIngressRule(
-      lambdaClientSg,
+      albSg,
       ec2.Port.tcp(llmServicePort),
-      "Allow Lambda clients to connect to LLM service"
+      "Allow ALB to connect to LLM service"
     );
 
-    // Allow LLM Service to pull images from ECR
-    llmServiceSg.addEgressRule(
-      ec2.Peer.ipv4(vpc.vpcCidrBlock),
-      ec2.Port.tcp(443),
-      "Allow HTTPS egress to VPC endpoints"
-    );
-
-    // Lambda Client Rules
-    lambdaClientSg.addEgressRule(
+    // Allow ALB to send traffic to LLM service
+    albSg.addEgressRule(
       llmServiceSg,
       ec2.Port.tcp(llmServicePort),
-      "Allow Lambda to connect to LLM service"
+      "Allow ALB to send traffic to LLM service"
     );
 
-    lambdaClientSg.addEgressRule(
-      ec2.Peer.securityGroupId(apiGatewayEndpointSg.securityGroupId),
-      ec2.Port.tcp(443),
-      "Allow Lambda to connect to API Gateway endpoint"
-    );
-
-    // Allow Lambda to use service discovery
-    lambdaClientSg.addEgressRule(
-      ec2.Peer.ipv4(vpc.vpcCidrBlock),
-      ec2.Port.tcp(443),
-      "Allow HTTPS egress to VPC endpoints for Service Discovery"
-    );
-
-    // // Get the prefix list ID for DynamoDB endpoint
-    // const dynamoDbPrefixList = cdk.Fn.importValue(
-    //   "com.amazonaws." + cdk.Stack.of(this).region + ".dynamodb.prefixListId"
-    // );
-    // console.log(
-    //   `Adding egress rule for DynamoDB prefix list ID: ${dynamoDbPrefixList}`
-    // );
-
-    // lambdaClientSg.addEgressRule(
-    //   ec2.Peer.prefixList(dynamoDbPrefixList),
-    //   ec2.Port.tcp(443),
-    //   "Allow Lambda to access DynamoDB VPC endpoint"
-    // );
-    // This is a less secure option but will work
-    lambdaClientSg.addEgressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(443),
-      "Allow HTTPS egress to AWS services including DynamoDB"
-    );
-    // API Gateway Endpoint Rules
-    apiGatewayEndpointSg.addIngressRule(
-      lambdaClientSg,
-      ec2.Port.tcp(443),
-      "Allow Lambda to communicate with API Gateway"
-    );
-
-    // Apply the security group to the API Gateway endpoint
-    apiGatewayEndpoint.addToPolicy(
-      new cdk.aws_iam.PolicyStatement({
-        effect: cdk.aws_iam.Effect.ALLOW,
-        principals: [new cdk.aws_iam.AnyPrincipal()],
-        actions: ["execute-api:Invoke", "execute-api:ManageConnections"],
-        resources: ["*"],
-      })
-    );
-
-    // Create Cloud Map namespace for service discovery
-    const namespace = new servicediscovery.PrivateDnsNamespace(
+    /**
+     * Application Load Balancer (ALB)
+     *
+     * Create a private ALB that will:
+     * - Serve as the single entry point for all traffic to LLM services
+     * - Handle health checks and only route to healthy instances
+     * - Distribute traffic across multiple instances
+     * - Provide a stable endpoint for Lambdas to communicate with
+     */
+    const alb = new elasticloadbalancingv2.ApplicationLoadBalancer(
       this,
-      "AiServicesNamespace",
+      "LlmServiceAlb",
       {
-        name: namespaceName,
         vpc,
-        description: "Namespace for AI Language Model Services",
+        internetFacing: false, // Internal ALB, not exposed to internet
+        securityGroup: albSg,
+        vpcSubnets: {
+          subnets: vpc.privateSubnets,
+        },
       }
     );
 
-    // Create a service discovery service for the LLM service
-    const llmService = namespace.createService("DeepseekLlmService", {
-      name: llmServiceName,
-      dnsRecordType: servicediscovery.DnsRecordType.A,
-      dnsTtl: cdk.Duration.seconds(10),
-      description: "DeepSeek LLM service for inference",
+    /**
+     * Target Group for ALB
+     *
+     * Define how the ALB will route traffic to instances:
+     * - Which port to use
+     * - How to perform health checks
+     * - What type of targets (EC2 instances)
+     */
+    const targetGroup = new elasticloadbalancingv2.ApplicationTargetGroup(
+      this,
+      "LlmServiceTargetGroup",
+      {
+        vpc,
+        port: llmServicePort,
+        protocol: elasticloadbalancingv2.ApplicationProtocol.HTTP,
+        targetType: elasticloadbalancingv2.TargetType.INSTANCE,
+        healthCheck: {
+          path: "/health", // Health check endpoint on LLM service
+          port: llmServicePort.toString(),
+          interval: cdk.Duration.seconds(30),
+          timeout: cdk.Duration.seconds(5),
+        },
+      }
+    );
+
+    /**
+     * ALB Listener
+     *
+     * Configure how the ALB accepts traffic:
+     * - Listen on HTTP port 80 (internal only)
+     * - Route all traffic to the LLM service target group
+     */
+    const listener = alb.addListener("LlmServiceListener", {
+      port: 80,
+      protocol: elasticloadbalancingv2.ApplicationProtocol.HTTP,
+      defaultTargetGroups: [targetGroup],
     });
 
-    // ------------------------------------------------------------------------
-    // Store infrastructure values in SSM Parameter Store for other services to use
-    // ------------------------------------------------------------------------
+    /**
+     * VPC Link for API Gateway
+     *
+     * Create a VPC Link that allows API Gateway to communicate with
+     * resources inside the private VPC (specifically the ALB)
+     *
+     * This enables the WebSocket API to communicate with the ALB
+     */
+    const vpcLink = new apigatewayv2.CfnVpcLink(this, "ApiGatewayVpcLink", {
+      name: "llm-service-vpc-link",
+      subnetIds: vpc.privateSubnets.map((subnet) => subnet.subnetId),
+      securityGroupIds: [albSg.securityGroupId],
+    });
+
+    /**
+     * Store Important Values in SSM Parameter Store
+     *
+     * These parameters will be used by:
+     * 1. The LLM Service Infrastructure Stack
+     * 2. The WebSocket Lambda functions
+     *
+     * Using SSM eliminates the need for hardcoding values and
+     * allows for better cross-stack references
+     */
 
     // VPC and Network Configuration
     new ssm.StringParameter(this, "SsmVpcId", {
@@ -256,89 +222,54 @@ export class VpcInfrastructureStack extends cdk.Stack {
       description: "VPC ID for shared AI services",
     });
 
-    // Create the subnet parameters directly from the VPC's isolated subnets instead
-    // This ensures we reference the correct type of subnets that are being created
-    if (vpc.isolatedSubnets.length > 0) {
-      console.log(
-        `Using isolated subnets. First subnet ID: ${vpc.isolatedSubnets[0].subnetId}`
-      );
-
-      // Create parameter for the first subnet
-      new ssm.StringParameter(this, "SsmLlmSubnet1Id", {
-        parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesPrivateSubnet1Id`,
-        stringValue: vpc.isolatedSubnets[0].subnetId,
-        description: "Private subnet 1 ID for shared AI services",
+    // Store private subnet parameters
+    vpc.privateSubnets.forEach((subnet, index) => {
+      new ssm.StringParameter(this, `SsmLlmSubnet${index + 1}Id`, {
+        parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesPrivateSubnet${
+          index + 1
+        }Id`,
+        stringValue: subnet.subnetId,
+        description: `Private subnet ${index + 1} ID for shared AI services`,
       });
+    });
 
-      // For any additional subnets
-      for (let i = 1; i < vpc.isolatedSubnets.length; i++) {
-        new ssm.StringParameter(this, `SsmLlmSubnet${i + 1}Id`, {
-          parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesPrivateSubnet${
-            i + 1
-          }Id`,
-          stringValue: vpc.isolatedSubnets[i].subnetId,
-          description: `Private subnet ${i + 1} ID for shared AI services`,
-        });
-      }
-    } else {
-      console.log("No isolated subnets were created!");
-    }
-
-    // Keep the original private subnet code as fallback
-    if (vpc.privateSubnets.length > 0) {
-      console.log(`Using private subnets as fallback`);
-      // Original code for private subnets (now as fallback)
-    }
-
+    // Security Groups
     new ssm.StringParameter(this, "SsmLlmServiceSgId", {
       parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesLlmServiceSgId`,
       stringValue: llmServiceSg.securityGroupId,
       description: "Security Group ID for LLM Service instances",
     });
 
-    new ssm.StringParameter(this, "SsmLambdaClientSgId", {
-      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesLambdaClientSgId`,
-      stringValue: lambdaClientSg.securityGroupId,
-      description:
-        "Security Group ID for Lambda functions connecting to LLM Service",
+    new ssm.StringParameter(this, "SsmAlbSgId", {
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesAlbSgId`,
+      stringValue: albSg.securityGroupId,
+      description: "Security Group ID for ALB",
     });
 
-    new ssm.StringParameter(this, "SsmApiGatewayEndpointSgId", {
-      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesApiGatewayEndpointSgId`,
-      stringValue: apiGatewayEndpointSg.securityGroupId,
-      description: "Security Group ID for API Gateway endpoint",
+    // ALB Information
+    new ssm.StringParameter(this, "SsmAlbDnsName", {
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesAlbDnsName`,
+      stringValue: alb.loadBalancerDnsName,
+      description: "DNS Name of the Application Load Balancer",
     });
 
-    // NEW: Store DynamoDB endpoint ID in SSM for reference
-    new ssm.StringParameter(this, "SsmDynamoDbEndpointId", {
-      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesDynamoDbEndpointId`,
-      stringValue: dynamoDbEndpoint.vpcEndpointId,
-      description: "DynamoDB VPC Endpoint ID for shared AI services",
+    new ssm.StringParameter(this, "SsmAlbListener", {
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesAlbListener`,
+      stringValue: listener.listenerArn,
+      description: "ARN of the ALB Listener",
     });
 
-    // Service Discovery Configuration
-    new ssm.StringParameter(this, "SsmNamespaceId", {
-      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesNamespaceId`,
-      stringValue: namespace.namespaceId,
-      description: "Cloud Map namespace ID for AI services",
+    new ssm.StringParameter(this, "SsmTargetGroupArn", {
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesTargetGroupArn`,
+      stringValue: targetGroup.targetGroupArn,
+      description: "ARN of the ALB Target Group",
     });
 
-    new ssm.StringParameter(this, "SsmNamespaceName", {
-      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesNamespaceName`,
-      stringValue: namespace.namespaceName,
-      description: "Cloud Map namespace name for AI services",
-    });
-
-    new ssm.StringParameter(this, "SsmLlmServiceId", {
-      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesLlmServiceId`,
-      stringValue: llmService.serviceId,
-      description: "LLM Service ID in Cloud Map",
-    });
-
-    new ssm.StringParameter(this, "SsmLlmServiceName", {
-      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesLlmServiceName`,
-      stringValue: llmService.serviceName,
-      description: "LLM Service name in Cloud Map",
+    // VPC Link
+    new ssm.StringParameter(this, "SsmVpcLinkId", {
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesVpcLinkId`,
+      stringValue: vpcLink.ref,
+      description: "ID of the VPC Link for API Gateway v2",
     });
 
     new ssm.StringParameter(this, "SsmVpcCidrBlock", {
@@ -347,173 +278,103 @@ export class VpcInfrastructureStack extends cdk.Stack {
       description: "CIDR block of the shared VPC",
     });
 
-    // Also create parameters for websocket-lambda-deepseek
+    // Parameters specifically for WebSocket Lambda
     new ssm.StringParameter(this, "SsmWsVpcId", {
       parameterName: `${webSocketLambdaPrefix}/SharedAiServicesVpcId`,
       stringValue: vpc.vpcId,
       description: "VPC ID for shared AI services",
     });
 
-    // Store websocket lambda subnet parameters using isolated subnets
-    if (vpc.isolatedSubnets.length > 0) {
-      // Create parameter for the first subnet
-      new ssm.StringParameter(this, "SsmWsSubnet1Id", {
-        parameterName: `${webSocketLambdaPrefix}/SharedAiServicesPrivateSubnet1Id`,
-        stringValue: vpc.isolatedSubnets[0].subnetId,
-        description: "Private subnet 1 ID for shared AI services",
-      });
-
-      // For any additional subnets
-      for (let i = 1; i < vpc.isolatedSubnets.length; i++) {
-        new ssm.StringParameter(this, `SsmWsSubnet${i + 1}Id`, {
-          parameterName: `${webSocketLambdaPrefix}/SharedAiServicesPrivateSubnet${
-            i + 1
-          }Id`,
-          stringValue: vpc.isolatedSubnets[i].subnetId,
-          description: `Private subnet ${i + 1} ID for shared AI services`,
-        });
-      }
-    } else if (vpc.privateSubnets.length > 0) {
-      // Fallback to private subnets if no isolated subnets
-      new ssm.StringParameter(this, "SsmWsSubnet1Id", {
-        parameterName: `${webSocketLambdaPrefix}/SharedAiServicesPrivateSubnet1Id`,
-        stringValue: vpc.privateSubnets[0].subnetId,
-        description: "Private subnet 1 ID for shared AI services",
-      });
-
-      // For any additional subnets
-      for (let i = 1; i < vpc.privateSubnets.length; i++) {
-        new ssm.StringParameter(this, `SsmWsSubnet${i + 1}Id`, {
-          parameterName: `${webSocketLambdaPrefix}/SharedAiServicesPrivateSubnet${
-            i + 1
-          }Id`,
-          stringValue: vpc.privateSubnets[i].subnetId,
-          description: `Private subnet ${i + 1} ID for shared AI services`,
-        });
-      }
-    }
-
-    // NEW: Also store DynamoDB endpoint ID for websocket stack
-    new ssm.StringParameter(this, "SsmWsDynamoDbEndpointId", {
-      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesDynamoDbEndpointId`,
-      stringValue: dynamoDbEndpoint.vpcEndpointId,
-      description: "DynamoDB VPC Endpoint ID for shared AI services",
+    new ssm.StringParameter(this, "SsmWsAlbDnsName", {
+      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesAlbDnsName`,
+      stringValue: alb.loadBalancerDnsName,
+      description: "DNS Name of the Application Load Balancer",
     });
 
-    new ssm.StringParameter(this, "SsmWsLambdaClientSgId", {
-      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesLambdaClientSgId`,
-      stringValue: lambdaClientSg.securityGroupId,
-      description:
-        "Security Group ID for Lambda functions connecting to LLM Service",
+    new ssm.StringParameter(this, "SsmWsVpcLinkId", {
+      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesVpcLinkId`,
+      stringValue: vpcLink.ref,
+      description: "ID of the VPC Link for API Gateway v2",
     });
 
-    new ssm.StringParameter(this, "SsmWsNamespaceName", {
-      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesNamespaceName`,
-      stringValue: namespace.namespaceName,
-      description: "Cloud Map namespace name for AI services",
-    });
-
-    new ssm.StringParameter(this, "SsmWsLlmServiceName", {
-      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesLlmServiceName`,
-      stringValue: llmService.serviceName,
-      description: "LLM Service name in Cloud Map",
-    });
-
-    // Add API Gateway Endpoint Security Group ID for websocket-lambda-deepseek
-    new ssm.StringParameter(this, "SsmWsApiGatewayEndpointSgId", {
-      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesApiGatewayEndpointSgId`,
-      stringValue: apiGatewayEndpointSg.securityGroupId,
-      description: "Security Group ID for API Gateway endpoint",
-    });
-
-    // Tag the VPC with a different name than its default security group
+    /**
+     * Resource Tagging
+     *
+     * Add descriptive tags to key resources for easier identification
+     * in the AWS Console and for cost attribution
+     */
     cdk.Tags.of(vpc).add("Name", "ai-services-vpc");
+    cdk.Tags.of(alb).add("Name", "llm-service-alb");
+    cdk.Tags.of(targetGroup).add("Name", "llm-service-target-group");
 
-    // Tag the VPC's default security group separately
-    const defaultSg = ec2.SecurityGroup.fromSecurityGroupId(
-      this,
-      "DefaultSecurityGroup",
-      vpc.vpcDefaultSecurityGroup
-    );
-    cdk.Tags.of(defaultSg).add("Name", "ai-services-vpc-default-sg");
+    /**
+     * Stack Outputs
+     *
+     * Export important resources for cross-stack references
+     * and for visibility in the CloudFormation console
+     */
 
-    // Outputs
-    // VPC and Subnet IDs
+    // VPC and Subnet Outputs
     new cdk.CfnOutput(this, "VpcId", {
       value: vpc.vpcId,
       description: "The ID of the VPC",
       exportName: "SharedAiServicesVpcId",
     });
 
-    // Output both isolated and private subnets
-    if (vpc.isolatedSubnets.length > 0) {
-      vpc.isolatedSubnets.forEach((subnet, index: number) => {
-        new cdk.CfnOutput(this, `IsolatedSubnet${index + 1}Id`, {
-          value: subnet.subnetId,
-          description: `The ID of isolated subnet ${index + 1}`,
-          exportName: `SharedAiServicesPrivateSubnet${index + 1}Id`,
-        });
+    // Output private subnets
+    vpc.privateSubnets.forEach((subnet, index) => {
+      new cdk.CfnOutput(this, `PrivateSubnet${index + 1}Id`, {
+        value: subnet.subnetId,
+        description: `The ID of private subnet ${index + 1}`,
+        exportName: `SharedAiServicesPrivateSubnet${index + 1}Id`,
       });
-    } else if (vpc.privateSubnets.length > 0) {
-      vpc.privateSubnets.forEach((subnet, index: number) => {
-        new cdk.CfnOutput(this, `PrivateSubnet${index + 1}Id`, {
-          value: subnet.subnetId,
-          description: `The ID of private subnet ${index + 1}`,
-          exportName: `SharedAiServicesPrivateSubnet${index + 1}Id`,
-        });
-      });
-    }
+    });
 
-    // Security Group IDs
+    // Output public subnets
+    vpc.publicSubnets.forEach((subnet, index) => {
+      new cdk.CfnOutput(this, `PublicSubnet${index + 1}Id`, {
+        value: subnet.subnetId,
+        description: `The ID of public subnet ${index + 1}`,
+        exportName: `SharedAiServicesPublicSubnet${index + 1}Id`,
+      });
+    });
+
+    // Security Group Outputs
     new cdk.CfnOutput(this, "LlmServiceSecurityGroupId", {
       value: llmServiceSg.securityGroupId,
       description: "Security Group ID for LLM Service instances",
       exportName: "SharedAiServicesLlmServiceSgId",
     });
 
-    new cdk.CfnOutput(this, "LambdaClientSecurityGroupId", {
-      value: lambdaClientSg.securityGroupId,
-      description:
-        "Security Group ID for Lambda functions connecting to LLM Service",
-      exportName: "SharedAiServicesLambdaClientSgId",
+    new cdk.CfnOutput(this, "AlbSecurityGroupId", {
+      value: albSg.securityGroupId,
+      description: "Security Group ID for Application Load Balancer",
+      exportName: "SharedAiServicesAlbSgId",
     });
 
-    new cdk.CfnOutput(this, "ApiGatewayEndpointSecurityGroupId", {
-      value: apiGatewayEndpointSg.securityGroupId,
-      description: "Security Group ID for API Gateway Management endpoint",
-      exportName: "SharedAiServicesApiGatewayEndpointSgId",
+    // ALB Outputs
+    new cdk.CfnOutput(this, "AlbDnsName", {
+      value: alb.loadBalancerDnsName,
+      description: "DNS Name of the Application Load Balancer",
+      exportName: "SharedAiServicesAlbDnsName",
     });
 
-    // NEW: Output DynamoDB endpoint ID
-    new cdk.CfnOutput(this, "DynamoDbEndpointId", {
-      value: dynamoDbEndpoint.vpcEndpointId,
-      description: "DynamoDB VPC Endpoint ID",
-      exportName: "SharedAiServicesDynamoDbEndpointId",
+    new cdk.CfnOutput(this, "AlbArn", {
+      value: alb.loadBalancerArn,
+      description: "ARN of the Application Load Balancer",
+      exportName: "SharedAiServicesAlbArn",
     });
 
-    // Cloud Map Namespace and Service
-    new cdk.CfnOutput(this, "CloudMapNamespaceId", {
-      value: namespace.namespaceId,
-      description: "The ID of the Cloud Map namespace",
-      exportName: "SharedAiServicesNamespaceId",
+    new cdk.CfnOutput(this, "VpcLinkId", {
+      value: vpcLink.ref,
+      description: "ID of the VPC Link for API Gateway v2",
+      exportName: "SharedAiServicesVpcLinkId",
     });
 
-    new cdk.CfnOutput(this, "CloudMapNamespaceName", {
-      value: namespace.namespaceName,
-      description: "The name of the Cloud Map namespace",
-      exportName: "SharedAiServicesNamespaceName",
-    });
-
-    new cdk.CfnOutput(this, "LlmServiceId", {
-      value: llmService.serviceId,
-      description: "The ID of the LLM Service in Cloud Map",
-      exportName: "SharedAiServicesLlmServiceId",
-    });
-
-    new cdk.CfnOutput(this, "LlmServiceName", {
-      value: llmService.serviceName,
-      description: "The name of the LLM Service in Cloud Map",
-      exportName: "SharedAiServicesLlmServiceName",
+    new cdk.CfnOutput(this, "TargetGroupArn", {
+      value: targetGroup.targetGroupArn,
+      description: "ARN of the ALB Target Group",
+      exportName: "SharedAiServicesTargetGroupArn",
     });
 
     // VPC CIDR
