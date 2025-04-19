@@ -138,11 +138,25 @@ export class VpcInfrastructureStack extends cdk.Stack {
       "Allow ALB to connect to LLM service"
     );
 
+    // Allow LLM service to receive traffic on port 80 for health checks
+    llmServiceSg.addIngressRule(
+      albSg,
+      ec2.Port.tcp(80),
+      "Allow ALB to connect to HTTP health check proxy"
+    );
+
     // Allow ALB to send traffic to LLM service
     albSg.addEgressRule(
       llmServiceSg,
       ec2.Port.tcp(llmServicePort),
       "Allow ALB to send traffic to LLM service"
+    );
+
+    // Allow ALB to send traffic to health check proxy
+    albSg.addEgressRule(
+      llmServiceSg,
+      ec2.Port.tcp(80),
+      "Allow ALB to send traffic to HTTP health check proxy"
     );
 
     /**
@@ -186,8 +200,8 @@ export class VpcInfrastructureStack extends cdk.Stack {
         protocol: elasticloadbalancingv2.ApplicationProtocol.HTTP,
         targetType: elasticloadbalancingv2.TargetType.INSTANCE,
         healthCheck: {
-          path: "/health", // Health check endpoint on LLM service
-          port: llmServicePort.toString(),
+          path: "/health", // Health check endpoint on HTTP proxy
+          port: "80", // Use the HTTP health check proxy running on port 80
           interval: cdk.Duration.seconds(30),
           timeout: cdk.Duration.seconds(5),
         },
