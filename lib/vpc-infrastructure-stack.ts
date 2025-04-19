@@ -190,6 +190,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
      * - Which port to use
      * - How to perform health checks
      * - What type of targets (EC2 instances)
+     * - Configured for gRPC and WebSocket support
      */
     const targetGroup = new elasticloadbalancingv2.ApplicationTargetGroup(
       this,
@@ -205,8 +206,34 @@ export class VpcInfrastructureStack extends cdk.Stack {
           interval: cdk.Duration.seconds(30),
           timeout: cdk.Duration.seconds(5),
         },
+        // Increase deregistration delay to allow for longer gRPC streams to complete
+        deregistrationDelay: cdk.Duration.seconds(120),
       }
     );
+
+    // Enable sticky sessions for WebSocket support
+    targetGroup.enableStickiness({
+      cookieDuration: cdk.Duration.days(1),
+      cookieName: "LlmServiceStickiness",
+    });
+
+    // Configure target group for HTTP/2 support (required for gRPC)
+    const cfnTargetGroup = targetGroup.node
+      .defaultChild as elasticloadbalancingv2.CfnTargetGroup;
+    cfnTargetGroup.addPropertyOverride("TargetGroupAttributes", [
+      {
+        Key: "protocol_version",
+        Value: "HTTP2",
+      },
+      {
+        Key: "load_balancing.algorithm.type",
+        Value: "least_outstanding_requests",
+      },
+      {
+        Key: "deregistration_delay.timeout_seconds",
+        Value: "120",
+      },
+    ]);
 
     /**
      * ALB Listener
