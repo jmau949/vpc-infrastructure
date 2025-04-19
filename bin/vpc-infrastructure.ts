@@ -5,12 +5,14 @@ import { VpcInfrastructureStack } from "../lib/vpc-infrastructure-stack";
 
 const app = new cdk.App();
 new VpcInfrastructureStack(app, "AiServicesVpcStack", {
-  env: {
-    account: process.env.CDK_DEFAULT_ACCOUNT,
-    region: process.env.CDK_DEFAULT_REGION || "us-west-2",
-  },
-  description:
-    "Shared VPC infrastructure for AI services with least permissive security groups and SSM parameter integration",
+  ...({
+    env: {
+      account: process.env.CDK_DEFAULT_ACCOUNT,
+      region: process.env.CDK_DEFAULT_REGION || "us-west-2",
+    },
+    description:
+      "Shared VPC infrastructure for AI services with least permissive security groups and SSM parameter integration",
+  } as cdk.StackProps),
 });
 
 app.synth();
