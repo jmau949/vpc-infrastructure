@@ -7,8 +7,8 @@ import { Construct } from "constructs";
 
 /**
  * Properties for the VPC Infrastructure Stack
- * 
- * This stack creates the foundational VPC infrastructure for the AI chatbot 
+ *
+ * This stack creates the foundational VPC infrastructure for the AI chatbot
  * including networking, security groups, and load balancer components
  */
 export interface VpcInfrastructureStackProps extends cdk.StackProps {
@@ -39,11 +39,11 @@ export class VpcInfrastructureStack extends cdk.Stack {
     // Use provided values or defaults
     const vpcCidr = props?.vpcCidr || "172.16.0.0/16";
     // IMPORTANT: Changed default maxAzs to 2 - ALB requires at least 2 AZs
-    const maxAzs = props?.maxAzs || 2; 
+    const maxAzs = props?.maxAzs || 2;
     if (maxAzs < 2) {
       throw new Error("maxAzs must be at least 2 for ALB deployment");
     }
-    
+
     const cidrMask = props?.cidrMask || 24;
     const llmServicePort = props?.llmServicePort || 50051;
     const serviceDiscoveryPrefix =
@@ -55,10 +55,10 @@ export class VpcInfrastructureStack extends cdk.Stack {
      * Create a VPC with both public and private subnets across multiple AZs
      * - Public subnets for NAT Gateway
      * - Private subnets with NAT Gateway for LLM service instances
-     * 
-     * The private subnets allow outbound internet access through 
+     *
+     * The private subnets allow outbound internet access through
      * the NAT Gateway for package updates and container image pulls
-     * 
+     *
      * IMPORTANT: ALB requires subnets in at least 2 different AZs
      */
     const vpc = new ec2.Vpc(this, "AiServicesVpc", {
@@ -83,11 +83,13 @@ export class VpcInfrastructureStack extends cdk.Stack {
     console.log(`VPC created with ID: ${vpc.vpcId}`);
     console.log(`Public subnets count: ${vpc.publicSubnets.length}`);
     console.log(`Private subnets count: ${vpc.privateSubnets.length}`);
-    console.log(`Available AZs: ${cdk.Stack.of(this).availabilityZones.join(', ')}`);
+    console.log(
+      `Available AZs: ${cdk.Stack.of(this).availabilityZones.join(", ")}`
+    );
 
     /**
      * Create S3 Gateway Endpoint
-     * 
+     *
      * This allows instances in private subnets to access S3 without
      * going through the NAT Gateway, reducing data transfer costs
      * and improving security by keeping traffic within AWS network
@@ -99,12 +101,12 @@ export class VpcInfrastructureStack extends cdk.Stack {
 
     /**
      * Security Groups
-     * 
+     *
      * Define security groups with least privilege principle:
      * 1. LLM Service SG - For the EC2 instances running the LLM service
      * 2. ALB SG - For the private Application Load Balancer
      */
-    
+
     // Security group for LLM service instances
     const llmServiceSg = new ec2.SecurityGroup(this, "LlmServiceSg", {
       vpc,
@@ -123,12 +125,12 @@ export class VpcInfrastructureStack extends cdk.Stack {
 
     /**
      * Security Group Rules
-     * 
+     *
      * Define the necessary ingress/egress rules:
      * - Allow ALB to send traffic to LLM service
      * - Allow LLM service to receive traffic from ALB
      */
-    
+
     // Allow LLM service to receive traffic from ALB
     llmServiceSg.addIngressRule(
       albSg,
@@ -145,13 +147,13 @@ export class VpcInfrastructureStack extends cdk.Stack {
 
     /**
      * Application Load Balancer (ALB)
-     * 
+     *
      * Create a private ALB that will:
      * - Serve as the single entry point for all traffic to LLM services
      * - Handle health checks and only route to healthy instances
      * - Distribute traffic across multiple instances
      * - Provide a stable endpoint for Lambdas to communicate with
-     * 
+     *
      * IMPORTANT: ALB requires subnets in at least 2 different AZs
      */
     const alb = new elasticloadbalancingv2.ApplicationLoadBalancer(
@@ -169,7 +171,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
 
     /**
      * Target Group for ALB
-     * 
+     *
      * Define how the ALB will route traffic to instances:
      * - Which port to use
      * - How to perform health checks
@@ -194,7 +196,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
 
     /**
      * ALB Listener
-     * 
+     *
      * Configure how the ALB accepts traffic:
      * - Listen on HTTP port 80 (internal only)
      * - Route all traffic to the LLM service target group
@@ -207,10 +209,10 @@ export class VpcInfrastructureStack extends cdk.Stack {
 
     /**
      * VPC Link for API Gateway
-     * 
-     * Create a VPC Link that allows API Gateway to communicate with 
+     *
+     * Create a VPC Link that allows API Gateway to communicate with
      * resources inside the private VPC (specifically the ALB)
-     * 
+     *
      * This enables the WebSocket API to communicate with the ALB
      */
     const vpcLink = new apigatewayv2.CfnVpcLink(this, "ApiGatewayVpcLink", {
@@ -221,15 +223,15 @@ export class VpcInfrastructureStack extends cdk.Stack {
 
     /**
      * Store Important Values in SSM Parameter Store
-     * 
+     *
      * These parameters will be used by:
      * 1. The LLM Service Infrastructure Stack
      * 2. The WebSocket Lambda functions
-     * 
+     *
      * Using SSM eliminates the need for hardcoding values and
      * allows for better cross-stack references
      */
-    
+
     // VPC and Network Configuration
     new ssm.StringParameter(this, "SsmVpcId", {
       parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesVpcId`,
@@ -237,10 +239,19 @@ export class VpcInfrastructureStack extends cdk.Stack {
       description: "VPC ID for shared AI services",
     });
 
+    // Store the maxAzs parameter to help LLM service stack know how many subnets to look for
+    new ssm.StringParameter(this, "SsmMaxAzs", {
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesMaxAzs`,
+      stringValue: maxAzs.toString(),
+      description: "Maximum number of Availability Zones used in VPC",
+    });
+
     // Store private subnet parameters
     vpc.privateSubnets.forEach((subnet, index) => {
       new ssm.StringParameter(this, `SsmLlmSubnet${index + 1}Id`, {
-        parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesPrivateSubnet${index + 1}Id`,
+        parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesPrivateSubnet${
+          index + 1
+        }Id`,
         stringValue: subnet.subnetId,
         description: `Private subnet ${index + 1} ID for shared AI services`,
       });
@@ -312,7 +323,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
 
     /**
      * Resource Tagging
-     * 
+     *
      * Add descriptive tags to key resources for easier identification
      * in the AWS Console and for cost attribution
      */
@@ -322,11 +333,11 @@ export class VpcInfrastructureStack extends cdk.Stack {
 
     /**
      * Stack Outputs
-     * 
+     *
      * Export important resources for cross-stack references
      * and for visibility in the CloudFormation console
      */
-    
+
     // VPC and Subnet Outputs
     new cdk.CfnOutput(this, "VpcId", {
       value: vpc.vpcId,
@@ -350,6 +361,13 @@ export class VpcInfrastructureStack extends cdk.Stack {
         description: `The ID of public subnet ${index + 1}`,
         exportName: `SharedAiServicesPublicSubnet${index + 1}Id`,
       });
+    });
+
+    // Output MaxAzs
+    new cdk.CfnOutput(this, "MaxAzs", {
+      value: maxAzs.toString(),
+      description: "Maximum number of Availability Zones used in VPC",
+      exportName: "SharedAiServicesMaxAzs",
     });
 
     // Security Group Outputs
