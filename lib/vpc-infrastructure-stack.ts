@@ -2,8 +2,12 @@ import * as cdk from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as elasticloadbalancingv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
-import * as apigatewayv2 from "aws-cdk-lib/aws-apigatewayv2";
+import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import { Construct } from "constructs";
+import * as dotenv from "dotenv";
+
+// Load environment variables from .env file
+dotenv.config();
 
 /**
  * Properties for the VPC Infrastructure Stack
@@ -50,6 +54,21 @@ export class VpcInfrastructureStack extends cdk.Stack {
       props?.serviceDiscoveryPrefix || "/deepseek-llm-service";
     const webSocketLambdaPrefix =
       props?.webSocketLambdaPrefix || "/websocket-lambda-deepseek";
+
+    // Import the ACM certificate by ARN from environment variables
+    const acmCertificateArn = process.env.DEEPSEEK_ACM_ARN;
+    if (!acmCertificateArn) {
+      throw new Error("DEEPSEEK_ACM_ARN environment variable is required");
+    }
+
+    // Certificate domain name
+    const certificateDomain = "deepseek.jonathanmau.com";
+
+    const certificate = acm.Certificate.fromCertificateArn(
+      this,
+      "DeepseekCertificate",
+      acmCertificateArn
+    );
 
     /**
      * Create a VPC with both public and private subnets across multiple AZs
@@ -105,6 +124,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
      * Define security groups with least privilege principle:
      * 1. LLM Service SG - For the EC2 instances running the LLM service
      * 2. ALB SG - For the private Application Load Balancer
+     * 3. Lambda SG - For Lambda functions inside the VPC
      */
 
     // Security group for LLM service instances
@@ -123,12 +143,21 @@ export class VpcInfrastructureStack extends cdk.Stack {
     });
     cdk.Tags.of(albSg).add("Name", "alb-sg");
 
+    // Security group for Lambda functions inside the VPC
+    const lambdaSg = new ec2.SecurityGroup(this, "LambdaSg", {
+      vpc,
+      description: "Security group for Lambda functions inside the VPC",
+      allowAllOutbound: true, // Allow outbound for Lambda functions
+    });
+    cdk.Tags.of(lambdaSg).add("Name", "lambda-sg");
+
     /**
      * Security Group Rules
      *
      * Define the necessary ingress/egress rules:
      * - Allow ALB to send traffic to LLM service
      * - Allow LLM service to receive traffic from ALB
+     * - Allow Lambda to communicate with ALB
      */
 
     // Allow LLM service to receive traffic from ALB
@@ -138,11 +167,11 @@ export class VpcInfrastructureStack extends cdk.Stack {
       "Allow ALB to connect to LLM service"
     );
 
-    // Allow LLM service to receive traffic on port 80 for health checks
+    // Allow LLM service to receive traffic on port 443 for health checks
     llmServiceSg.addIngressRule(
       albSg,
-      ec2.Port.tcp(80),
-      "Allow ALB to connect to HTTP health check proxy"
+      ec2.Port.tcp(443),
+      "Allow ALB to connect to HTTPS health check proxy"
     );
 
     // Allow ALB to send traffic to LLM service
@@ -155,8 +184,36 @@ export class VpcInfrastructureStack extends cdk.Stack {
     // Allow ALB to send traffic to health check proxy
     albSg.addEgressRule(
       llmServiceSg,
-      ec2.Port.tcp(80),
-      "Allow ALB to send traffic to HTTP health check proxy"
+      ec2.Port.tcp(443),
+      "Allow ALB to send traffic to HTTPS health check proxy"
+    );
+
+    // Allow ALB to receive traffic from Lambda
+    albSg.addIngressRule(
+      lambdaSg,
+      ec2.Port.tcp(443),
+      "Allow Lambda to connect to ALB HTTPS"
+    );
+
+    // For gRPC over HTTP/2
+    albSg.addIngressRule(
+      lambdaSg,
+      ec2.Port.tcp(443),
+      "Allow Lambda to connect to ALB HTTPS"
+    );
+
+    // Allow Lambda to send traffic to ALB
+    lambdaSg.addEgressRule(
+      albSg,
+      ec2.Port.tcp(443),
+      "Allow Lambda to send traffic to ALB HTTPS"
+    );
+
+    // For gRPC over HTTP/2
+    lambdaSg.addEgressRule(
+      albSg,
+      ec2.Port.tcp(443),
+      "Allow Lambda to send traffic to ALB HTTPS"
     );
 
     /**
@@ -198,11 +255,13 @@ export class VpcInfrastructureStack extends cdk.Stack {
       {
         vpc,
         port: llmServicePort,
-        protocol: elasticloadbalancingv2.ApplicationProtocol.HTTP,
+        protocol: elasticloadbalancingv2.ApplicationProtocol.HTTPS,
         targetType: elasticloadbalancingv2.TargetType.INSTANCE,
+        protocolVersion:
+          elasticloadbalancingv2.ApplicationProtocolVersion.HTTP2,
         healthCheck: {
           path: "/health", // Health check endpoint on HTTP proxy
-          port: "80", // Use the HTTP health check proxy running on port 80
+          port: "443", // Use the HTTPS health check proxy running on port 443
           interval: cdk.Duration.seconds(30),
           timeout: cdk.Duration.seconds(5),
         },
@@ -211,20 +270,10 @@ export class VpcInfrastructureStack extends cdk.Stack {
       }
     );
 
-    // Enable sticky sessions for WebSocket support
-    targetGroup.enableStickiness({
-      cookieDuration: cdk.Duration.days(1),
-      cookieName: "LlmServiceStickiness",
-    });
-
-    // Configure target group for HTTP/2 support (required for gRPC)
+    // Configure target group for HTTP/2 support (required for gRPC) and sticky sessions
     const cfnTargetGroup = targetGroup.node
       .defaultChild as elasticloadbalancingv2.CfnTargetGroup;
     cfnTargetGroup.addPropertyOverride("TargetGroupAttributes", [
-      {
-        Key: "protocol_version",
-        Value: "HTTP2",
-      },
       {
         Key: "load_balancing.algorithm.type",
         Value: "least_outstanding_requests",
@@ -233,33 +282,37 @@ export class VpcInfrastructureStack extends cdk.Stack {
         Key: "deregistration_delay.timeout_seconds",
         Value: "120",
       },
+      {
+        Key: "stickiness.enabled",
+        Value: "true",
+      },
+      {
+        Key: "stickiness.type",
+        Value: "app_cookie",
+      },
+      {
+        Key: "stickiness.app_cookie.cookie_name",
+        Value: "LlmServiceStickiness",
+      },
+      {
+        Key: "stickiness.app_cookie.duration_seconds",
+        Value: "900", // 15 minutes
+      },
     ]);
 
     /**
      * ALB Listener
      *
      * Configure how the ALB accepts traffic:
-     * - Listen on HTTP port 80 (internal only)
+     * - Listen on HTTPS port 443 (internal only)
+     * - Use imported ACM certificate for TLS
      * - Route all traffic to the LLM service target group
      */
     const listener = alb.addListener("LlmServiceListener", {
-      port: 80,
-      protocol: elasticloadbalancingv2.ApplicationProtocol.HTTP,
+      port: 443,
+      protocol: elasticloadbalancingv2.ApplicationProtocol.HTTPS,
       defaultTargetGroups: [targetGroup],
-    });
-
-    /**
-     * VPC Link for API Gateway
-     *
-     * Create a VPC Link that allows API Gateway to communicate with
-     * resources inside the private VPC (specifically the ALB)
-     *
-     * This enables the WebSocket API to communicate with the ALB
-     */
-    const vpcLink = new apigatewayv2.CfnVpcLink(this, "ApiGatewayVpcLink", {
-      name: "llm-service-vpc-link",
-      subnetIds: vpc.privateSubnets.map((subnet) => subnet.subnetId),
-      securityGroupIds: [albSg.securityGroupId],
+      certificates: [certificate],
     });
 
     /**
@@ -311,6 +364,12 @@ export class VpcInfrastructureStack extends cdk.Stack {
       description: "Security Group ID for ALB",
     });
 
+    new ssm.StringParameter(this, "SsmLambdaSgId", {
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesLambdaSgId`,
+      stringValue: lambdaSg.securityGroupId,
+      description: "Security Group ID for Lambda functions",
+    });
+
     // ALB Information
     new ssm.StringParameter(this, "SsmAlbDnsName", {
       parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesAlbDnsName`,
@@ -324,17 +383,22 @@ export class VpcInfrastructureStack extends cdk.Stack {
       description: "ARN of the ALB Listener",
     });
 
+    new ssm.StringParameter(this, "SsmCertificateArn", {
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesCertificateArn`,
+      stringValue: acmCertificateArn,
+      description: "ARN of the ACM Certificate used by the ALB",
+    });
+
+    new ssm.StringParameter(this, "SsmCertificateDomain", {
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesCertificateDomain`,
+      stringValue: certificateDomain,
+      description: "Domain name of the ACM Certificate used by the ALB",
+    });
+
     new ssm.StringParameter(this, "SsmTargetGroupArn", {
       parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesTargetGroupArn`,
       stringValue: targetGroup.targetGroupArn,
       description: "ARN of the ALB Target Group",
-    });
-
-    // VPC Link
-    new ssm.StringParameter(this, "SsmVpcLinkId", {
-      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesVpcLinkId`,
-      stringValue: vpcLink.ref,
-      description: "ID of the VPC Link for API Gateway v2",
     });
 
     new ssm.StringParameter(this, "SsmVpcCidrBlock", {
@@ -343,7 +407,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
       description: "CIDR block of the shared VPC",
     });
 
-    // Parameters specifically for WebSocket Lambda
+    // Parameters specifically for WebSocket Lambda - now direct ALB access
     new ssm.StringParameter(this, "SsmWsVpcId", {
       parameterName: `${webSocketLambdaPrefix}/SharedAiServicesVpcId`,
       stringValue: vpc.vpcId,
@@ -356,10 +420,21 @@ export class VpcInfrastructureStack extends cdk.Stack {
       description: "DNS Name of the Application Load Balancer",
     });
 
-    new ssm.StringParameter(this, "SsmWsVpcLinkId", {
-      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesVpcLinkId`,
-      stringValue: vpcLink.ref,
-      description: "ID of the VPC Link for API Gateway v2",
+    new ssm.StringParameter(this, "SsmWsLambdaSgId", {
+      parameterName: `${webSocketLambdaPrefix}/SharedAiServicesLambdaSgId`,
+      stringValue: lambdaSg.securityGroupId,
+      description: "Security Group ID for Lambda functions",
+    });
+
+    // Store private subnet parameters for Lambda configuration
+    vpc.privateSubnets.forEach((subnet, index) => {
+      new ssm.StringParameter(this, `SsmWsSubnet${index + 1}Id`, {
+        parameterName: `${webSocketLambdaPrefix}/SharedAiServicesPrivateSubnet${
+          index + 1
+        }Id`,
+        stringValue: subnet.subnetId,
+        description: `Private subnet ${index + 1} ID for WebSocket Lambda`,
+      });
     });
 
     /**
@@ -371,6 +446,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
     cdk.Tags.of(vpc).add("Name", "ai-services-vpc");
     cdk.Tags.of(alb).add("Name", "llm-service-alb");
     cdk.Tags.of(targetGroup).add("Name", "llm-service-target-group");
+    cdk.Tags.of(lambdaSg).add("Name", "lambda-sg");
 
     /**
      * Stack Outputs
@@ -424,6 +500,12 @@ export class VpcInfrastructureStack extends cdk.Stack {
       exportName: "SharedAiServicesAlbSgId",
     });
 
+    new cdk.CfnOutput(this, "LambdaSecurityGroupId", {
+      value: lambdaSg.securityGroupId,
+      description: "Security Group ID for Lambda functions",
+      exportName: "SharedAiServicesLambdaSgId",
+    });
+
     // ALB Outputs
     new cdk.CfnOutput(this, "AlbDnsName", {
       value: alb.loadBalancerDnsName,
@@ -437,16 +519,22 @@ export class VpcInfrastructureStack extends cdk.Stack {
       exportName: "SharedAiServicesAlbArn",
     });
 
-    new cdk.CfnOutput(this, "VpcLinkId", {
-      value: vpcLink.ref,
-      description: "ID of the VPC Link for API Gateway v2",
-      exportName: "SharedAiServicesVpcLinkId",
-    });
-
     new cdk.CfnOutput(this, "TargetGroupArn", {
       value: targetGroup.targetGroupArn,
       description: "ARN of the ALB Target Group",
       exportName: "SharedAiServicesTargetGroupArn",
+    });
+
+    new cdk.CfnOutput(this, "CertificateArn", {
+      value: acmCertificateArn,
+      description: "ARN of the ACM Certificate used by the ALB",
+      exportName: "SharedAiServicesCertificateArn",
+    });
+
+    new cdk.CfnOutput(this, "CertificateDomain", {
+      value: certificateDomain,
+      description: "Domain name of the ACM Certificate used by the ALB",
+      exportName: "SharedAiServicesCertificateDomain",
     });
 
     // VPC CIDR
