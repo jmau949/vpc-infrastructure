@@ -5,6 +5,8 @@ import * as elasticloadbalancingv2 from "aws-cdk-lib/aws-elasticloadbalancingv2"
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import { Construct } from "constructs";
 import * as dotenv from "dotenv";
+import * as route53 from "aws-cdk-lib/aws-route53";
+import * as route53aliases from "aws-cdk-lib/aws-route53-targets";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -315,6 +317,26 @@ export class VpcInfrastructureStack extends cdk.Stack {
       certificates: [certificate],
     });
 
+    const privateHostedZone = new route53.PrivateHostedZone(
+      this,
+      "PrivateHostedZone",
+      {
+        zoneName: certificateDomain,
+        vpc: vpc,
+        comment: "Private hosted zone for deepseek LLM service",
+      }
+    );
+
+    // Create A record pointing to the ALB
+    new route53.ARecord(this, "AlbAliasRecord", {
+      zone: privateHostedZone,
+      recordName: certificateDomain,
+      target: route53.RecordTarget.fromAlias(
+        new route53aliases.LoadBalancerTarget(alb)
+      ),
+      comment: "Points to the internal ALB for deepseek LLM service",
+    });
+
     /**
      * Store Important Values in SSM Parameter Store
      *
@@ -325,6 +347,20 @@ export class VpcInfrastructureStack extends cdk.Stack {
      * Using SSM eliminates the need for hardcoding values and
      * allows for better cross-stack references
      */
+
+    // Store the hosted zone ID in SSM for cross-stack reference
+    new ssm.StringParameter(this, "SsmHostedZoneId", {
+      parameterName: `${serviceDiscoveryPrefix}/SharedAiServicesHostedZoneId`,
+      stringValue: privateHostedZone.hostedZoneId,
+      description: "ID of the private hosted zone for deepseek LLM service",
+    });
+
+    // Add output for the hosted zone
+    new cdk.CfnOutput(this, "PrivateHostedZoneId", {
+      value: privateHostedZone.hostedZoneId,
+      description: "ID of the private hosted zone",
+      exportName: "SharedAiServicesPrivateHostedZoneId",
+    });
 
     // VPC and Network Configuration
     new ssm.StringParameter(this, "SsmVpcId", {
