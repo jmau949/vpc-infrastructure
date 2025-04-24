@@ -266,6 +266,11 @@ export class VpcInfrastructureStack extends cdk.Stack {
           port: "443", // Use the HTTPS health check proxy running on port 443
           interval: cdk.Duration.seconds(30),
           timeout: cdk.Duration.seconds(5),
+          protocol: elasticloadbalancingv2.Protocol.HTTPS,
+          healthyHttpCodes: "200-299",
+          tlsConfig: {
+            validateCertificate: false,
+          },
         },
         // Increase deregistration delay to allow for longer gRPC streams to complete
         deregistrationDelay: cdk.Duration.seconds(120),
