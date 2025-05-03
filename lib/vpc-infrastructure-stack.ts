@@ -257,7 +257,7 @@ export class VpcInfrastructureStack extends cdk.Stack {
       {
         vpc,
         port: llmServicePort,
-        protocol: elasticloadbalancingv2.ApplicationProtocol.HTTPS,
+        protocol: elasticloadbalancingv2.ApplicationProtocol.HTTP,
         targetType: elasticloadbalancingv2.TargetType.INSTANCE,
         protocolVersion:
           elasticloadbalancingv2.ApplicationProtocolVersion.HTTP2,
