@@ -169,11 +169,11 @@ export class VpcInfrastructureStack extends cdk.Stack {
       "Allow ALB to connect to LLM service"
     );
 
-    // Allow LLM service to receive traffic on port 443 for health checks
+    // Allow LLM service to receive traffic from ALB for health checks
     llmServiceSg.addIngressRule(
       albSg,
-      ec2.Port.tcp(443),
-      "Allow ALB to connect to HTTPS health check proxy"
+      ec2.Port.tcp(80),
+      "Allow ALB to connect to HTTP health check proxy"
     );
 
     // Allow ALB to send traffic to LLM service
@@ -186,8 +186,8 @@ export class VpcInfrastructureStack extends cdk.Stack {
     // Allow ALB to send traffic to health check proxy
     albSg.addEgressRule(
       llmServiceSg,
-      ec2.Port.tcp(443),
-      "Allow ALB to send traffic to HTTPS health check proxy"
+      ec2.Port.tcp(80),
+      "Allow ALB to send traffic to HTTP health check proxy"
     );
 
     // Allow ALB to receive traffic from Lambda
@@ -263,14 +263,11 @@ export class VpcInfrastructureStack extends cdk.Stack {
           elasticloadbalancingv2.ApplicationProtocolVersion.HTTP2,
         healthCheck: {
           path: "/health", // Health check endpoint on HTTP proxy
-          port: "443", // Use the HTTPS health check proxy running on port 443
+          port: "80", // Use the HTTP health check proxy running on port 80
           interval: cdk.Duration.seconds(30),
           timeout: cdk.Duration.seconds(5),
-          protocol: elasticloadbalancingv2.Protocol.HTTPS,
+          protocol: elasticloadbalancingv2.Protocol.HTTP,
           healthyHttpCodes: "200-299",
-          tlsConfig: {
-            validateCertificate: false,
-          },
         },
         // Increase deregistration delay to allow for longer gRPC streams to complete
         deregistrationDelay: cdk.Duration.seconds(120),
